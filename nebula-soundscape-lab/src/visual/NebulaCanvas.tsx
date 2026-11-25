@@ -559,9 +559,6 @@ class NebulaEngine {
       this.bloomCurrent = this.bloomTarget;
       this.sizeCurrent = this.sizeTarget;
       this.coreCurrent = this.coreTarget;
-      // 粒子尺寸：基线 × treble 细节脉动（高频点亮星点），整体体量再随 bass 涨缩
-    const sizeGroove = this.sizeCurrent * (1 + this.grooveTreble * 0.22) * (1 + this.grooveBass * 0.12);
-    this.uniforms.uSize.value = sizeGroove;
       this.behaviorCurrent.copy(this.behaviorTarget);
       this.shearCurrent = this.shearTarget;
       this.camTheta = this.camThetaTarget;
@@ -849,6 +846,11 @@ class NebulaEngine {
     this.grooveMid += (bands.mid - this.grooveMid) * grooveK;
     this.grooveTreble += (bands.treble - this.grooveTreble) * grooveK;
 
+    // 粒子尺寸：基线 × treble 细节脉动（高频点亮星点），整体体量再随 bass 涨缩；低落时略收
+    const sizeGroove =
+      this.sizeCurrent * (1 + this.grooveTreble * 0.22) * (1 + this.grooveBass * 0.12) * (1 - (1 - this.grooveBass) * 0.05);
+    this.uniforms.uSize.value = sizeGroove;
+
     this.uniformColors.forEach((c, idx) => {
       c.lerp(this.targetColors[idx] ?? c, 1 - Math.exp(-3.2 * dt));
     });
@@ -924,22 +926,22 @@ class NebulaEngine {
     // 背景星野：缓慢微旋 + 错相位闪烁；整体明度随 bass 呼吸，低落时压暗
     this.starfield.rotation.y += dt * 0.004;
     this.starMaterial.uniforms.uTime.value = t;
-    const starDim = 0.62 + this.grooveBass * 0.38;
+    const starDim = 0.45 + this.grooveBass * 0.55;
     (this.starfield.material as THREE.ShaderMaterial).opacity = starDim;
 
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
     this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6) * (0.3 + coreK * 0.8));
-    coreMat.opacity = (0.08 + bands.bass * 0.12) * coreK;
+    coreMat.opacity = (0.05 + bands.bass * 0.15) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
     // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光
     const lift = this.grooveBass * 0.55 + this.grooveMid * 0.3;
     this.bloom.strength = this.bloomCurrent * 0.92 + lift + this.bloomKick;
 
-    // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢（沿相机距离方向缩放粒子群）
-    const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.04;
+    // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢压暗（沿相机距离方向缩放粒子群）
+    const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.06;
     this.points.scale.setScalar(bodyScale);
     this.coreSprite.scale.multiplyScalar(bodyScale);
 
