@@ -1,5 +1,13 @@
 import { AudioLines, Camera, ChevronDown, Link2, Music2, Sparkles, Volume1, Volume2, VolumeX, X } from 'lucide-react';
-import type { FormEvent, ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
+import { createPortal } from 'react-dom';
 import type { NebulaPreset, PresetId, ScaleId, TimbreId } from '../types';
 import { PRESET_MAP, type Inspiration } from '../visual/presets';
 import { SCALE_LIBRARY, scaleDisplayName } from '../audio/scales';
@@ -67,7 +75,12 @@ function Chip({
   );
 }
 
-/** 紧凑的玻璃拟态下拉选择器（音色 / 音阶），原生 select 以保持键盘与移动端可用 */
+/**
+ * 紧凑的玻璃拟态下拉选择器（音色 / 音阶）。
+ * 原生 <select> 的展开列表无法定制样式，因此改为自绘菜单：
+ * 面板经 Portal 挂到 body（底部控制栏自身带 backdrop-filter，会截断其后代的模糊范围），
+ * 用 fixed 定位对齐到触发器右上方，支持键盘 ↑/↓/Home/End/Enter/Esc。
+ */
 function GlassSelect<T extends string>({
   icon,
   label,
@@ -81,31 +94,136 @@ function GlassSelect<T extends string>({
   options: { id: T; name: string; title?: string }[];
   onChange: (id: T) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [pos, setPos] = useState({ right: 0, bottom: 0, maxHeight: 280 });
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const current = options.find((o) => o.id === value);
+
+  const openMenu = (): void => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setPos({
+      right: Math.max(8, window.innerWidth - r.right),
+      bottom: window.innerHeight - r.top + 8,
+      maxHeight: Math.min(300, Math.max(140, r.top - 16)),
+    });
+    setActive(Math.max(0, options.findIndex((o) => o.id === value)));
+    setOpen(true);
+  };
+
+  const choose = (id: T): void => {
+    onChange(id);
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  // 点击面板外部 / 窗口尺寸变化 / 失焦时关闭
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent): void => {
+      const t = e.target as Node;
+      if (!rootRef.current?.contains(t) && !menuRef.current?.contains(t)) setOpen(false);
+    };
+    const close = (): void => setOpen(false);
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('resize', close);
+    window.addEventListener('blur', close);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('blur', close);
+    };
+  }, [open]);
+
+  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>): void => {
+    if (e.key === 'Escape') {
+      setOpen(false);
+      return;
+    }
+    if (!open) {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        openMenu();
+      }
+      return;
+    }
+    let next = active;
+    if (e.key === 'ArrowDown') next = Math.min(options.length - 1, active + 1);
+    else if (e.key === 'ArrowUp') next = Math.max(0, active - 1);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = options.length - 1;
+    else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      const o = options[active];
+      if (o) choose(o.id);
+      return;
+    } else return;
+    e.preventDefault();
+    setActive(next);
+    menuRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[next]?.scrollIntoView({ block: 'nearest' });
+  };
+
   return (
-    <label
-      title={current?.title ?? label}
-      className="group flex shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-[12px] text-white/70 transition-colors hover:border-white/25 hover:bg-white/[0.08] hover:text-white"
-    >
+    <div ref={rootRef} className="flex shrink-0 items-center gap-1.5 text-white/70">
       {icon}
       <span className="hidden text-white/40 md:inline">{label}</span>
-      <span className="relative flex items-center">
-        <select
-          aria-label={label}
-          value={value}
-          onChange={(e) => onChange(e.target.value as T)}
-          style={{ colorScheme: 'dark' }}
-          className="cursor-pointer appearance-none truncate bg-transparent pr-3.5 text-[12px] text-white/85 focus:outline-none"
-        >
-          {options.map((o) => (
-            <option key={o.id} value={o.id} className="bg-[#0b0d18] text-white">
-              {o.name}
-            </option>
-          ))}
-        </select>
-        <ChevronDown size={11} className="pointer-events-none absolute right-0 text-white/40 transition-colors group-hover:text-white/70" />
-      </span>
-    </label>
+      <button
+        ref={triggerRef}
+        type="button"
+        title={current?.title ?? label}
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => (open ? setOpen(false) : openMenu())}
+        onKeyDown={onKeyDown}
+        className={`flex max-w-[140px] items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
+          open
+            ? 'border-white/30 bg-white/[0.12] text-white'
+            : 'border-white/10 bg-white/[0.04] text-white/85 hover:border-white/25 hover:bg-white/[0.1] hover:text-white'
+        }`}
+      >
+        <span className="truncate">{current?.name ?? label}</span>
+        <ChevronDown
+          size={11}
+          className={`shrink-0 text-white/40 transition-transform duration-300 ${open ? 'rotate-180 text-white/70' : ''}`}
+        />
+      </button>
+
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="listbox"
+            aria-label={label}
+            style={{ right: pos.right, bottom: pos.bottom, maxHeight: pos.maxHeight }}
+            className="dock-pop scrollbar-none fixed z-50 w-[max-content] min-w-[136px] max-w-[260px] overflow-y-auto rounded-2xl border border-white/[0.14] bg-white/[0.06] p-1.5 shadow-[0_20px_60px_-18px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur-2xl"
+          >
+            {options.map((o, i) => (
+              <button
+                key={o.id}
+                type="button"
+                role="option"
+                aria-selected={o.id === value}
+                title={o.title}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => choose(o.id)}
+                className={`flex w-full items-center justify-between gap-3 rounded-xl px-2.5 py-1.5 text-left text-[12px] transition-colors ${
+                  i === active ? 'bg-white/[0.14] text-white' : 'text-white/65'
+                }`}
+              >
+                <span className="truncate">{o.name}</span>
+                {o.id === value && (
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-white shadow-[0_0_8px_#ffffff]" />
+                )}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </div>
   );
 }
 
