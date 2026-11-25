@@ -12,8 +12,6 @@ import {
   nebulaVertexShader,
   starfieldFragmentShader,
   starfieldVertexShader,
-  fogVertexShader,
-  fogFragmentShader,
   VignetteShader,
 } from './nebulaShaders';
 import { buildShape, type ShapeAttributes } from './shapeGenerators';
@@ -117,9 +115,6 @@ class NebulaEngine {
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
   private starMaterial!: THREE.ShaderMaterial;
-  /** 体积雾云气层（低密度大尺寸软粒子，随 bass 呼吸） */
-  private fog!: THREE.Points;
-  private fogMaterial!: THREE.ShaderMaterial;
   private coreSprite: THREE.Sprite;
   private material: THREE.ShaderMaterial;
   private uniforms: Record<string, THREE.IUniform>;
@@ -312,7 +307,6 @@ class NebulaEngine {
     this.scene.add(this.coreSprite);
 
     this.buildStarfield();
-    this.buildFog();
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -400,54 +394,6 @@ class NebulaEngine {
     this.starfield = new THREE.Points(geo, this.starMaterial);
     this.starfield.frustumCulled = false;
     this.scene.add(this.starfield);
-  }
-
-  /**
-   * 体积雾云气层：环绕星云的低密度大尺寸软粒子，呈半透明气态包裹。
-   * 数量远少于主粒子，尺寸大、透明度低，颜色取内核色的柔化版；随 bass 胀缩与变亮。
-   */
-  private buildFog(): void {
-    const n = isMobileDevice() ? 80 : 150;
-    const pos = new Float32Array(n * 3);
-    const size = new Float32Array(n);
-    const seed = new Float32Array(n);
-    // 雾片外移到粒子群外围，避免贴在内层把核心裹住
-    const rMin = 2.6;
-    const rMax = 4.6;
-    for (let i = 0; i < n; i++) {
-      const u = Math.random() * 2 - 1;
-      const ph = Math.random() * Math.PI * 2;
-      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
-      const st = Math.sqrt(1 - u * u);
-      pos[i * 3] = r * st * Math.cos(ph);
-      pos[i * 3 + 1] = r * u * 0.8;
-      pos[i * 3 + 2] = r * st * Math.sin(ph);
-      size[i] = 3.5 + Math.random() * 5;
-      seed[i] = Math.random();
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
-
-    this.fogMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0 },
-        uBass: { value: 0 },
-        uPixelRatio: { value: this.renderer.getPixelRatio() },
-        uColor: { value: new THREE.Color(this.preset.colors[0]) },
-        uMap: { value: this.texture },
-      },
-      vertexShader: fogVertexShader,
-      fragmentShader: fogFragmentShader,
-      transparent: true,
-      depthWrite: false,
-      depthTest: false,
-      blending: THREE.AdditiveBlending,
-    });
-    this.fog = new THREE.Points(geo, this.fogMaterial);
-    this.fog.frustumCulled = false;
-    this.scene.add(this.fog);
   }
 
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
@@ -1012,12 +958,6 @@ class NebulaEngine {
     const starDim = 0.32 + this.grooveBass * 0.38;
     (this.starfield.material as THREE.ShaderMaterial).opacity = starDim;
 
-    // 体积雾：缓慢漂移，透明度与胀缩随 bass 呼吸，颜色跟随内核色
-    this.fogMaterial.uniforms.uTime.value = t;
-    this.fogMaterial.uniforms.uBass.value = this.grooveBass;
-    (this.fogMaterial.uniforms.uColor.value as THREE.Color).copy(this.uniformColors[0]).lerp(new THREE.Color('#ffffff'), 0.15);
-    this.fog.rotation.y -= dt * 0.002;
-
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
@@ -1111,8 +1051,6 @@ class NebulaEngine {
     this.points.geometry.dispose();
     this.starfield.geometry.dispose();
     this.starMaterial.dispose();
-    this.fog.geometry.dispose();
-    this.fogMaterial.dispose();
     this.material.dispose();
     this.coreSprite.material.dispose();
     this.texture.dispose();

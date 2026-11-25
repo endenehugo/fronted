@@ -295,65 +295,6 @@ void main() {
 }
 `;
 
-// ---------------------------------------------------------------- 体积雾云气层
-
-/**
- * 低密度大尺寸软粒子雾片：叠加在主粒子之外，提供气态包裹感。
- * 顶点按 Simplex Noise 缓慢漂移，片元径向衰减成柔和云团；透明度随 bass 呼吸。
- */
-export const fogVertexShader = /* glsl */ `
-precision highp float;
-
-attribute float aSeed;
-attribute float aSize;
-
-uniform float uTime;
-uniform float uBass;
-uniform float uPixelRatio;
-
-varying float vSeed;
-varying float vAlpha;
-
-${NOISE_GLSL}
-
-void main() {
-  vSeed = aSeed;
-  vec3 p = position;
-  // 缓慢湍流漂移
-  float n1 = snoise(p * 0.35 + vec3(0.0, uTime * 0.05, aSeed * 7.0));
-  float n2 = snoise(p * 0.35 + vec3(7.3, -uTime * 0.04, aSeed * 3.0));
-  p += vec3(n1, n2 * 0.7, n1 * 0.5) * 0.35;
-
-  vec4 mv = modelViewMatrix * vec4(p, 1.0);
-  // 雾片尺寸：大而柔，随 bass 轻微胀缩
-  float sizePx = aSize * uPixelRatio * (1.0 + uBass * 0.18);
-  gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
-  gl_Position = projectionMatrix * mv;
-
-  // 透明度：基础低透明，bass 轻微托起；越靠外越淡
-  vAlpha = 0.028 + uBass * 0.03;
-}
-`;
-
-export const fogFragmentShader = /* glsl */ `
-precision highp float;
-
-uniform sampler2D uMap;
-uniform vec3 uColor;
-
-varying float vSeed;
-varying float vAlpha;
-
-void main() {
-  vec4 tex = texture2D(uMap, gl_PointCoord);
-  vec2 uv = gl_PointCoord - 0.5;
-  float d = length(uv) * 2.0;
-  float falloff = exp(-d * d * 1.6);
-  float a = tex.a * falloff * vAlpha;
-  gl_FragColor = vec4(uColor, a);
-}
-`;
-
 // ---------------------------------------------------------------- 后期暗角
 
 /** 电影感暗角通道：四周压暗，中心保持明亮；强度随 bass 轻微呼吸 */
