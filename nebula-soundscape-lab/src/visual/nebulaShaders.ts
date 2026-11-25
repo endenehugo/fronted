@@ -1,6 +1,12 @@
 /**
- * 星云粒子着色器
- * 顶点：开普勒差速旋转 + Simplex 湍流 + 指针引力旋涡 + 坍缩 + 超新星冲击波
+ * 星云粒子着色器（双缓冲形变版）
+ *
+ * 顶点：
+ *   1. 双缓冲形变 position → aTargetPosition（cubic ease-in-out + 中段旋涡扭转）
+ *   2. 分形态动态物理 uBehavior（自转 / 径向脉冲 / 垂直升腾 / 湍流）
+ *   3. 开普勒差速旋转 uShear
+ *   4. 坍缩、超新星冲击波、指针引力旋涡、键盘星簇爆发
+ *
  * 片元：径向高斯衰减 × 程序化高斯贴图，叠加混合
  */
 
@@ -76,21 +82,20 @@ float snoise(vec3 v) {
 export const nebulaVertexShader = /* glsl */ `
 precision highp float;
 
-attribute float aType;     // 0 核心恒星区 / 1 对数螺旋旋臂 / 2 外围星尘晕
-attribute float aRadius;   // 基础半径
-attribute float aTheta;    // 基础极角
-attribute float aY;        // 垂直偏移
-attribute float aSize;     // 基础尺寸
-attribute float aSeed;     // 随机种子
+attribute vec3  aTargetPosition;  // 目标形态坐标（双缓冲）
+attribute float aSize;            // 粒子基础尺寸
+attribute float aSeed;            // 随机种子
+attribute float aRole;            // 结构角色权重 0~1
+attribute float aColorT;          // 颜色梯度参数 0~1
 
 uniform float uTime;
+uniform float uMorphProgress;     // 0.0 → 1.0
+uniform vec4  uBehavior;          // x 自转 / y 径向脉冲 / z 垂直升腾 / w 湍流强度
+uniform float uShear;             // 开普勒差速强度
+
 uniform float uBass;
 uniform float uMid;
 uniform float uTreble;
-uniform float uTurbulence;
-uniform float uSpeed;
-uniform float uSpin;
-uniform float uTwist;
 uniform float uCollapse;
 uniform float uShockRadius;
 uniform float uShockAmp;
@@ -108,69 +113,99 @@ varying float vAlpha;
 
 ${NOISE_GLSL}
 
+vec2 rot2(vec2 p, float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
 void main() {
   float t = uTime;
 
-  float isCore = 1.0 - step(0.5, aType);
-  float isArm  = step(0.5, aType) * (1.0 - step(1.5, aType));
-  float isHalo = step(1.5, aType);
+  // ================= 1. 双缓冲形变 =================
+  float p = clamp(uMorphProgress, 0.0, 1.0);
+  // cubic ease-in-out
+  float e = p < 0.5 ? 4.0 * p * p * p : 1.0 - pow(-2.0 * p + 2.0, 3.0) / 2.0;
+  vec3 base = mix(position, aTargetPosition, e);
 
-  // ---- 开普勒差速旋转：内圈略快于外圈（保持旋臂可辨识） ----
-  float omega = uSpin * uSpeed * (0.55 + 0.45 / (0.9 + aRadius * 0.6));
-  // ---- 对数螺旋：theta = theta0 + twist * ln(1 + r)，可随预设平滑插值 ----
-  float theta = aTheta + log(1.0 + aRadius) * uTwist + t * omega;
+  // 过渡中段：绕轴旋涡扭转，让粒子以星尘旋涡轨迹重组
+  float tw = sin(p * 3.14159265);
+  if (tw > 0.001) {
+    float r0 = length(base.xz);
+    float twAng = tw * (1.15 + aRole * 2.4);
+    base.xz = rot2(base.xz, twAng);
+    base.y += tw * 0.38 * sin(aSeed * 6.2831 + r0 * 1.8);
+    base *= 1.0 - tw * 0.14;
+  }
 
-  // ---- 半径：低频心跳呼吸 + 长按坍缩 ----
-  float r = aRadius;
-  r *= 1.0 + uBass * 0.22 * isCore * (0.75 + 0.25 * sin(t * 3.2 + aSeed * 6.2831));
-  r *= mix(1.0, 0.035, uCollapse);
+  // ================= 2. 分形态动态物理 =================
+  float r = length(base.xz);
 
-  vec3 base = vec3(cos(theta) * r, aY * mix(1.0, 0.12, uCollapse), sin(theta) * r);
+  // 2.1 自转 + 开普勒差速（内快外慢）
+  float omega = uBehavior.x * (1.0 + uShear * aRole / (0.35 + r));
+  base.xz = rot2(base.xz, t * omega);
 
-  // ---- 气体湍流褶皱（Simplex Curl 近似） ----
-  vec3 np = base * 0.42 + vec3(aSeed * 17.0);
-  float n1 = snoise(np + vec3(0.0, t * 0.11, 0.0));
-  float n2 = snoise(np * 1.7 + vec3(11.3, -t * 0.14, 5.1));
-  vec3 turb = vec3(n1, n2 * 0.65, n1 * 0.55);
-  base += turb * uTurbulence * (0.16 + 0.55 * isArm) * (0.55 + uMid * 1.45);
+  // 2.2 径向脉冲（随低频能量呼吸）
+  float pulse = uBehavior.y * uBass * (0.55 + 0.45 * sin(t * 3.4 + aSeed * 6.2831));
+  base *= 1.0 + pulse;
 
-  // ---- 超新星冲击波：以中心为圆心的球面波前 ----
-  float dc = length(base.xz);
-  float wave = exp(-pow((dc - uShockRadius) / 0.75, 2.0)) * uShockAmp;
-  base.xz += normalize(base.xz + vec2(0.0001)) * wave * 1.45;
-  base.y  += wave * 0.28 * sin(aSeed * 31.0);
+  // 2.3 垂直升腾：每个粒子从自身基点缓慢上升并淡出（相位由种子错开，形态不被拉散）
+  float fade = 1.0;
+  if (uBehavior.z > 0.001) {
+    float period = 7.0;
+    float ph = mod(t * uBehavior.z * 3.0 + aSeed * period, period);
+    base.y += ph * 0.28;
+    fade *= 1.0 - ph / period;
+  }
 
-  // ---- 指针局部引力旋涡：径向吸附 + 切向搅动 ----
+  // 2.4 湍流
+  vec3 np = base * 0.55 + vec3(aSeed * 13.0);
+  float n1 = snoise(np + vec3(0.0, t * 0.12, 0.0));
+  float n2 = snoise(np * 1.8 + vec3(7.3, -t * 0.15, 3.1));
+  base += vec3(n1, n2 * 0.7, n1 * 0.5) * uBehavior.w * (0.1 + 0.22 * aRole) * (0.6 + uMid * 1.3);
+
+  // ================= 3. 全局交互形变 =================
+  // 坍缩
+  base *= mix(1.0, 0.04, uCollapse);
+  base.y *= mix(1.0, 0.2, uCollapse);
+
+  // 超新星冲击波（球面波前）
+  float dc = length(base);
+  float wave = exp(-pow((dc - uShockRadius) / 0.8, 2.0)) * uShockAmp;
+  base += normalize(base + vec3(0.0001)) * wave * 1.5;
+
+  // 指针局部引力旋涡
   vec3 toP = uPointer - base;
   float pd = length(toP);
   float infl = smoothstep(3.2, 0.0, pd) * uPointerStrength;
   vec3 pdir = toP / max(pd, 0.0001);
   vec3 tang = normalize(cross(vec3(0.0, 1.0, 0.0), pdir) + vec3(0.0001));
-  base += (pdir * 0.55 + tang * 0.95) * infl * (0.45 + 0.75 * isArm);
+  base += (pdir * 0.55 + tang * 0.95) * infl * (0.45 + 0.75 * aRole);
 
-  // ---- 键盘星簇光脉冲 ----
+  // 键盘星簇光脉冲
   float bd = length(base - uBurstPos);
   float burst = exp(-bd * bd * 0.55) * uBurstAmp;
 
+  // ================= 4. 投影与尺寸 =================
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
 
-  // ---- 尺寸：高频星尘闪烁 + 低频核心膨胀 ----
-  float twinkle = 1.0 + uTreble * isHalo * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
-  float sizePx = aSize * uSize * uPixelRatio * twinkle * (1.0 + uBass * 0.35 * isCore + burst * 1.8);
+  float twinkle = 1.0 + uTreble * aRole * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
+  float sizePx = aSize * uSize * uPixelRatio * twinkle * (1.0 + uBass * 0.35 * aRole + burst * 1.8);
   gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
   gl_Position = projectionMatrix * mv;
 
-  // ---- 配色：内核 / 旋臂 / 外晕三段渐变 ----
-  vec3 col = mix(uColors[1], uColors[0], isCore);
-  col = mix(col, uColors[2], isHalo * 0.88 + smoothstep(1.0, 7.0, dc) * 0.38 * isArm);
-
+  // ================= 5. 颜色 =================
+  vec3 col = aColorT < 0.5
+    ? mix(uColors[0], uColors[1], aColorT * 2.0)
+    : mix(uColors[1], uColors[2], (aColorT - 0.5) * 2.0);
   vColor = col;
-  vGlow = isCore * (0.22 + uBass * 0.55)
-        + isArm * 0.34
-        + isHalo * 0.10
+
+  vGlow = (1.0 - aColorT) * 0.4
+        + aRole * 0.12
+        + uBass * 0.35 * (1.0 - aColorT)
         + burst * 2.4
         + wave * 1.4;
-  vAlpha = 0.20 + 0.80 * (isCore * 0.72 + isArm * 0.50 + isHalo * 0.16);
+  vAlpha = (0.22 + 0.78 * (1.0 - aColorT * 0.55)) * fade;
 }
 `;
 

@@ -18,6 +18,28 @@ export interface EmotionVector {
 /** 三段式渐变色：内核 → 旋臂 → 外晕 */
 export type Palette = [string, string, string];
 
+/** 分形态动态物理参数（对应 Shader 的 uBehavior vec4） */
+export interface ShapeBehavior {
+  /** 自转速度 */
+  spin: number;
+  /** 径向脉冲（随低频） */
+  pulse: number;
+  /** 垂直升腾速度 */
+  drift: number;
+  /** 湍流强度 */
+  turbulence: number;
+}
+
+/** 形态专属最佳观赏机位 */
+export interface CameraView {
+  /** 俯仰角（自 +Y 轴起算的极角，弧度） */
+  phi: number;
+  /** 方位角（绕 Y 轴，弧度；决定从哪个朝向看形态） */
+  theta: number;
+  /** 相机距离 */
+  dist: number;
+}
+
 export interface NebulaPreset {
   id: PresetId;
   /** 中文名称，如「猎户座 · 静谧」 */
@@ -48,6 +70,14 @@ export interface NebulaPreset {
   description: string;
   /** 情绪坐标中心，用于文本 → 预设匹配 */
   centroid: EmotionVector;
+  /** 专属动态物理 */
+  behavior: ShapeBehavior;
+  /** 专属最佳机位 */
+  camera: CameraView;
+  /** 差速旋转强度（吸积盘类形态需要强差速） */
+  shear: number;
+  /** 核心辉光强度 0~1（黑洞等形态需要压到接近 0，保留绝对空心的视界） */
+  core: number;
 }
 
 /** 写入 URL Hash 的可序列化状态 */
