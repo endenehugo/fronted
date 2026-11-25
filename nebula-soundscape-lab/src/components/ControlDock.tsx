@@ -175,7 +175,7 @@ export default function ControlDock(props: Props) {
           </div>
         </div>
 
-        {/* 效价滑块：低落 ↔ 明亮，连续改变星云形态与配色 */}
+        {/* 效价滑块：低落 ↔ 明亮，只渐变配色，形状不变 */}
         <div className="mt-2 flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
           <span className="shrink-0 text-[11px] text-white/45">低落</span>
           <input
@@ -185,7 +185,7 @@ export default function ControlDock(props: Props) {
             value={Math.round(valenceValue * 100)}
             onChange={(e) => onValence(Number(e.target.value) / 100)}
             className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-white/20"
-            aria-label="情绪效价滑块：低落至明亮"
+            aria-label="情绪配色滑块：低落至明亮"
           />
           <span className="shrink-0 text-[11px] text-white/45">明亮</span>
           <span className="hidden w-10 shrink-0 text-right font-mono text-[10px] text-white/35 sm:inline">

@@ -164,10 +164,8 @@ class NebulaEngine {
   private morphProgress = 0;
   private transitionSwirl = 0;
 
-  // 效价滑块连续形变：两端锚点形态缓存 + 当前插值比例（null = 未启用，跟随预设）
+  // 效价滑块：只改配色、不动几何；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
   private valenceMix: number | null = null;
-  private shapeLow: ShapeAttributes | null = null;
-  private shapeHigh: ShapeAttributes | null = null;
 
   // 相机
   private camTheta = 0.4;
@@ -599,58 +597,24 @@ class NebulaEngine {
   }
 
   /**
-   * 效价滑块连续形变：mix ∈ [-1,1]，-1 锚定深思/低落形态，1 锚定狂喜/明亮形态。
-   * 启用后在两端缓存形态间逐帧插值几何与配色；传 null 关闭，回到当前预设形态。
+   * 效价滑块：mix ∈ [-1,1]，-1 锚定深思/低落配色，1 锚定狂喜/明亮配色。
+   * 只在两端调色板间渐变，几何形状保持当前预设不变；传 null 关闭，回到当前预设配色。
    */
   setValenceMix(mix: number | null): void {
     if (mix === null) {
       this.valenceMix = null;
-      // 关闭滑块：回到当前预设形态（走标准 morph）
-      this.beginMorph(buildShape(this.shapeId, this.count));
+      // 关闭滑块：回到当前预设/解析配色
+      this.targetColors = this.preset.colors.map((c) => new THREE.Color(c));
       return;
     }
-    if (!this.shapeLow || !this.shapeHigh) {
-      this.shapeLow = buildShape(PRESET_MAP.melancholy.id, this.count);
-      this.shapeHigh = buildShape(PRESET_MAP.euphoria.id, this.count);
-    }
     this.valenceMix = Math.min(1, Math.max(-1, mix));
-    this.applyValenceGeometry();
+    this.applyValenceColors();
   }
 
-  /** 按当前 valenceMix 把两端几何插值写入 position / aTargetPosition 等缓冲 */
-  private applyValenceGeometry(): void {
-    if (this.valenceMix === null || !this.shapeLow || !this.shapeHigh) return;
+  /** 按当前 valenceMix 在两端调色板间插值配色（不触碰任何几何缓冲） */
+  private applyValenceColors(): void {
+    if (this.valenceMix === null) return;
     const t = (this.valenceMix + 1) / 2; // 0 低落端 → 1 明亮端
-    const geo = this.points.geometry;
-    const low = this.shapeLow;
-    const high = this.shapeHigh;
-    const n = this.count;
-
-    const lerpAttr = (name: string, lo: Float32Array, hi: Float32Array, scalar: boolean) => {
-      const attr = geo.getAttribute(name) as THREE.BufferAttribute;
-      const arr = attr.array as Float32Array;
-      const stride = scalar ? 1 : 3;
-      for (let i = 0; i < n; i++) {
-        const li = scalar ? i : i * 3;
-        arr[li] = lo[li] + (hi[li] - lo[li]) * t;
-        if (!scalar) {
-          arr[li + 1] = lo[li + 1] + (hi[li + 1] - lo[li + 1]) * t;
-          arr[li + 2] = lo[li + 2] + (hi[li + 2] - lo[li + 2]) * t;
-        }
-      }
-      attr.needsUpdate = true;
-    };
-
-    lerpAttr('position', low.position, high.position, false);
-    lerpAttr('aTargetPosition', low.position, high.position, false);
-    lerpAttr('aSize', low.size, high.size, true);
-    lerpAttr('aTargetSize', low.size, high.size, true);
-    lerpAttr('aRole', low.role, high.role, true);
-    lerpAttr('aTargetRole', low.role, high.role, true);
-    lerpAttr('aColorT', low.colorT, high.colorT, true);
-    lerpAttr('aTargetColorT', low.colorT, high.colorT, true);
-
-    // 配色在两端预设调色板间渐变
     const lowC = PRESET_MAP.melancholy.colors;
     const highC = PRESET_MAP.euphoria.colors;
     this.targetColors = lowC.map((hex, i) => {
