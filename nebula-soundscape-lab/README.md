@@ -215,10 +215,11 @@ src/
 - **视觉「潮汐呼吸」四维同步**（`NebulaCanvas.tsx` / `nebulaShaders.ts`）：
   - 慢包络 `uEnergy`：目标 = `tide × 0.7 + level × 0.7 + tide × level × 0.1`（`level` 为时域 RMS，已扣除铺底本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
   - ① 整体缩放与沉浮：`base *= 0.88 + uEnergy × 0.30`（高潮 +18%、低落 −12%），`base.y += (uEnergy − 0.5) × 0.25`。
-  - ② 旋臂转速：`omega = uBehavior.x × (0.4 + uEnergy × 1.4 + uMid × 0.6) × 差速项`。
+  - ② 旋臂转速：转角由 CPU 逐帧积分 `spinPhase += dt × uBehavior.x × (0.25 + uEnergy × 0.5 + uMid × 0.25)` 传入 `uSpinPhase`，
+    着色器 `rot2(base.xz, uSpinPhase × 差速项)`。不能用 `uTime × ω`：潮汐改变 ω 时粒子会瞬间多转「运行秒数 × Δω」，页面开得越久转得越快。
   - ③ 粒子与核心：`gl_PointSize × (0.85 + uEnergy × 0.30 + uTreble × 0.30 × role)`，核心 Sprite 随 `uBass` 脉冲并随 `uEnergy` 额外胀大。
   - ④ 辉光明暗：`vGlow += (uEnergy − 0.5) × 0.3`、`vAlpha × (0.82 + uEnergy × 0.2)`，`UnrealBloomPass.strength = bloomCurrent × (0.7 + uEnergy × 0.45) × 0.92 + bass × 0.95 + kick`。
-- **控制栏**（`ControlDock.tsx`）：「音色」「音阶」两个玻璃拟态原生 `select`（`GlassSelect`，`colorScheme: dark`），位于音量左侧，`md` 以下隐藏文字标签只留图标与当前值。
+- **控制栏**（`ControlDock.tsx`）：「音色」「音阶」两个玻璃拟态下拉（`GlassSelect`，自绘 listbox 经 Portal 挂到 body，原生 `<select>` 的展开列表无法定制样式），位于音量左侧，`md` 以下隐藏文字标签只留图标与当前值。
 
 ## 五、验收对照
 

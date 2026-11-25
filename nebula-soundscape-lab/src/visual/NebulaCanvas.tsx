@@ -64,6 +64,14 @@ const ENERGY_DAMP_FALL = 1.7;
 /** 音频未就绪时的包络基线：画面保持中低位的静息呼吸，而非压到最暗 */
 const ENERGY_IDLE = 0.35;
 
+/**
+ * 自转角速度的潮汐因子：ω = spin × (SPIN_BASE + energy × SPIN_ENERGY + mid × SPIN_MID)。
+ * 待机包络 0.35 时约 0.49，潮汐高潮约 0.95 → 高低潮之间约 2 倍速差，整体保持缓慢漂移。
+ */
+const SPIN_BASE = 0.25;
+const SPIN_ENERGY = 0.5;
+const SPIN_MID = 0.25;
+
 /** 背景星野恒星数（桌面 / 移动） */
 const STARFIELD_COUNT = { desktop: 3500, mobile: 2000 };
 
@@ -155,6 +163,8 @@ class NebulaEngine {
 
   /** 潮汐呼吸慢包络：目标由 总 RMS × 旋律潮汐 合成，上升 / 回落用不同 λ 阻尼 */
   private energyCurrent = ENERGY_IDLE;
+  /** 自转积分角（弧度）：逐帧累加，保证角速度变化时不产生转角跳变 */
+  private spinPhase = 0;
 
   // 分形态动态物理
   private behaviorTarget = new THREE.Vector4(0.2, 0.1, 0, 0.1);
@@ -258,6 +268,7 @@ class NebulaEngine {
       uMid: { value: 0 },
       uTreble: { value: 0 },
       uEnergy: { value: ENERGY_IDLE },
+      uSpinPhase: { value: 0 },
       uCollapse: { value: 1 },
       uShockRadius: { value: 0 },
       uShockAmp: { value: 0 },
@@ -823,6 +834,11 @@ class NebulaEngine {
     );
     const energy = this.energyCurrent;
     this.uniforms.uEnergy.value = energy;
+
+    // 自转积分角：behaviorCurrent.x（预设自转 × 心情缩放）已做阻尼平滑，能量 / 中频也是慢包络，
+    // 所以直接欧拉累加即可，角速度连续、无跳变。
+    this.spinPhase += dt * this.behaviorCurrent.x * (SPIN_BASE + energy * SPIN_ENERGY + bands.mid * SPIN_MID);
+    this.uniforms.uSpinPhase.value = this.spinPhase;
 
     // 视觉参数逐帧指数阻尼（MathUtils.damp 即 1 - exp(-lambda·dt)，帧率无关）
     this.bloomCurrent = THREE.MathUtils.damp(this.bloomCurrent, this.bloomTarget, 3.0, dt);

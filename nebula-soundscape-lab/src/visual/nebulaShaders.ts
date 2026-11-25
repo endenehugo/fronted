@@ -112,6 +112,7 @@ uniform float uBass;
 uniform float uMid;
 uniform float uTreble;
 uniform float uEnergy;            // 潮汐呼吸慢包络 0~1（总 RMS × 旋律潮汐，damp 平滑）
+uniform float uSpinPhase;         // 自转积分角（CPU 逐帧累加 dt × 角速度，含 uBehavior.x 与潮汐因子）
 uniform float uCollapse;
 uniform float uShockRadius;
 uniform float uShockAmp;
@@ -166,9 +167,10 @@ void main() {
   // ================= 2. 分形态动态物理 =================
   float r = length(base.xz);
 
-  // 2.1 自转 + 开普勒差速（内快外慢）；角速度随潮汐能量与中频起伏：高潮加速、低落近于静止
-  float omega = uBehavior.x * (0.4 + uEnergy * 1.4 + uMid * 0.6) * (1.0 + uShear * role / (0.35 + r));
-  base.xz = rot2(base.xz, t * omega);
+  // 2.1 自转 + 开普勒差速（内快外慢）。
+  //     转角必须用 CPU 积分的 uSpinPhase：若写成 uTime × ω，潮汐改变 ω 时粒子会瞬间多转「运行秒数 × Δω」，
+  //     页面开得越久转得越快。角速度随潮汐能量与中频在约 2.5 倍范围内起伏：高潮加速、低落近乎静止。
+  base.xz = rot2(base.xz, uSpinPhase * (1.0 + uShear * role / (0.35 + r)));
 
   // 2.2 径向脉冲（随低频能量呼吸）
   float pulse = uBehavior.y * uBass * (0.55 + 0.45 * sin(t * 3.4 + aSeed * 6.2831));
