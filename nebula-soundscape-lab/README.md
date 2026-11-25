@@ -209,9 +209,10 @@ src/
 
   每个情绪预设通过 `NebulaPreset.timbre` 绑定推荐音色；控制栏手动切换后 `timbreLocked` 置位，换星体不再回落。键盘拨弦 / 点击 / 悬停 / 落定确认音都走当前音色。
 - **音阶切换器**（`scales.ts`）：`SCALE_LIBRARY` 含大调五声、自然小调、多利亚、利底亚、弗里吉亚五种调式（音程数组，`buildScale` 按 MIDI→Hz 换算，`A3 = 220Hz` / `C4` 为基准）。`presetScale(preset, scaleId)`：`'preset'` 沿用星体自带调式，否则以星体主音为根套用调式库；顶栏与控制栏实时显示 `scaleDisplayName`。
-- **潮汐起伏自动旋律**：`tideAt(t) = (0.5 − 0.5·cos(2πt/14))^1.6`，14s 一个周期、低潮段被拉长。八分音符步进时按潮汐取密度：低潮约每 2.5s 一颗单音，高潮逼近每步一颗；`tide > 0.55` 概率叠加三度 / 四度双音，`tide > 0.8` 再垫一颗低八度 `synth_pad`；同时每拍把 Drone 增益 `setTargetAtTime(基线 × (1 + tide × 1.1), τ=0.4)` 推升（潜入过渡的 Drone 避让窗口内不介入）。待机大星系整体密度 ×0.22。
+- **潮汐起伏自动旋律**：`tideAt(t) = (0.5 − 0.5·cos(2πt/14))^1.6`，14s 一个周期、低潮段被拉长。八分音符步进时按潮汐取密度：低潮约每 2.5s 一颗单音，高潮逼近每步一颗；`tide > 0.55` 概率叠加三度 / 四度双音，`tide > 0.8` 再垫一颗低八度 `synth_pad`；同时每拍把 Drone 增益 `setTargetAtTime(基线 × (1 + tide × 0.5), τ=0.4)` 推升（潜入过渡的 Drone 避让窗口内不介入）。待机大星系整体密度 ×0.22。
+- **Drone 铺底为什么不再「嗡」**：实测原实现（65/98/131Hz，三角波，待机增益 0.2）占总输出 RMS 的 92%，98Hz 三角波的三次谐波在 294Hz 形成尖峰，是一层恒定的次低频嗡声。现在根音抬一个八度（`presetDrone` 用 `root + 12`）、全部正弦、总线加 90Hz 高通、待机增益 0.09、潮汐推升上限 1.5 倍。
 - **视觉「潮汐呼吸」四维同步**（`NebulaCanvas.tsx` / `nebulaShaders.ts`）：
-  - 慢包络 `uEnergy`：目标 = `tide × 0.55 + level × 0.55 + tide × level × 0.1`（`level` 为时域 RMS，已扣除 Drone 本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
+  - 慢包络 `uEnergy`：目标 = `tide × 0.7 + level × 0.7 + tide × level × 0.1`（`level` 为时域 RMS，已扣除 Drone 本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
   - ① 整体缩放与沉浮：`base *= 0.88 + uEnergy × 0.30`（高潮 +18%、低落 −12%），`base.y += (uEnergy − 0.5) × 0.25`。
   - ② 旋臂转速：`omega = uBehavior.x × (0.4 + uEnergy × 1.4 + uMid × 0.6) × 差速项`。
   - ③ 粒子与核心：`gl_PointSize × (0.85 + uEnergy × 0.30 + uTreble × 0.30 × role)`，核心 Sprite 随 `uBass` 脉冲并随 `uEnergy` 额外胀大。

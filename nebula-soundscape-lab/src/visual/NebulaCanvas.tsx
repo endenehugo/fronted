@@ -813,7 +813,7 @@ class NebulaEngine {
     // 潮汐呼吸慢包络：潮汐强度为主、瞬时 RMS 为辅；上升快（0.5s）、回落慢（1.8s）
     const audioOn = this.audio.ready;
     const energyTarget = audioOn
-      ? Math.min(1, bands.tide * 0.55 + bands.level * 0.55 + bands.tide * bands.level * 0.1)
+      ? Math.min(1, bands.tide * 0.7 + bands.level * 0.7 + bands.tide * bands.level * 0.1)
       : ENERGY_IDLE;
     this.energyCurrent = THREE.MathUtils.damp(
       this.energyCurrent,

@@ -232,7 +232,11 @@ export class NebulaAudioEngine {
     this.melody = g;
   }
 
-  /** Ambient Drone：两个微失谐振荡器 + 纯五度 + 低通 + 极慢 LFO */
+  /**
+   * Ambient Drone：微失谐正弦 + 纯五度 + 低通 + 极慢 LFO。
+   * 全部用正弦（三角波的三次谐波会在 294Hz 形成「嗡里带滋」的尖峰），
+   * 并在总线加 90Hz 高通切掉次低频，避免恒定的低沉嗡声。
+   */
   private buildDrone(): void {
     const ctx = this.ctx!;
     const gain = ctx.createGain();
@@ -243,6 +247,12 @@ export class NebulaAudioEngine {
     filter.frequency.value = 520;
     filter.Q.value = 0.7;
 
+    // 次低频滚降：65Hz 以下的持续嗡声在人耳里只剩「难受」，没有音乐信息
+    const highpass = ctx.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = 90;
+    highpass.Q.value = 0.5;
+
     const lfo = ctx.createOscillator();
     lfo.frequency.value = 0.05;
     const lfoGain = ctx.createGain();
@@ -251,8 +261,8 @@ export class NebulaAudioEngine {
     lfoGain.connect(filter.frequency);
 
     const defs = [
-      { type: 'sine' as OscillatorType, detune: -6, gain: 0.55 },
-      { type: 'triangle' as OscillatorType, detune: 6, gain: 0.32 },
+      { type: 'sine' as OscillatorType, detune: -4, gain: 0.55 },
+      { type: 'sine' as OscillatorType, detune: 4, gain: 0.32 },
       { type: 'sine' as OscillatorType, detune: 0, gain: 0.2 },
     ];
 
@@ -269,7 +279,8 @@ export class NebulaAudioEngine {
       oscs.push(osc);
     }
 
-    filter.connect(gain);
+    filter.connect(highpass);
+    highpass.connect(gain);
     gain.connect(this.master);
     lfo.start();
 
@@ -387,9 +398,9 @@ export class NebulaAudioEngine {
     return this.ctx ? this.tideAt(this.ctx.currentTime) : 0;
   }
 
-  /** Drone 增益目标：待机铺底更厚，星体按湍流微调 */
+  /** Drone 增益目标：铺底只做背景，不盖过旋律 */
   private droneGainTarget(preset: NebulaPreset): number {
-    return preset.id === 'galaxy_idle' ? 0.2 : 0.13 + preset.turbulence * 0.05;
+    return preset.id === 'galaxy_idle' ? 0.09 : 0.075 + preset.turbulence * 0.03;
   }
 
   setVolume(v: number): void {
@@ -437,10 +448,10 @@ export class NebulaAudioEngine {
     this.scheduleChime(time, tide);
   }
 
-  /** Drone 潮汐推升：高潮最多抬到基线的 2.1 倍，低潮回到基线 */
+  /** Drone 潮汐推升：高潮最多抬到基线的 1.5 倍（再高就变成周期性的低频轰鸣），低潮回到基线 */
   private pushDrone(tide: number, now: number): void {
     if (!this.drone || !this.preset || now < this.droneHoldUntil) return;
-    const target = this.droneGainTarget(this.preset) * (1 + tide * 1.1);
+    const target = this.droneGainTarget(this.preset) * (1 + tide * 0.5);
     this.drone.gain.gain.setTargetAtTime(target, now, 0.4);
   }
 
@@ -916,8 +927,8 @@ export class NebulaAudioEngine {
     const rawMid = Math.min(1, avg(150, 2000) * 1.8);
     const rawTreble = Math.min(1, avg(2000, sr / 2) * 2.8);
 
-    // 总 RMS：时域样本偏离中值（128）的均方根。×5 后再扣掉纯 Drone 铺底的本底（≈0.32）、
-    // 以高潮段（≈0.95）为满刻度，使低潮 ≈0.1、高潮 ≈1，静音时归零
+    // 总 RMS：时域样本偏离中值（128）的均方根。×5 后扣掉纯 Drone 铺底的本底（≈0.2）、
+    // 以高潮段（≈0.7）为满刻度，使低潮 ≈0.1、高潮 ≈1，静音时归零
     let rawLevel = 0;
     if (this.timeData) {
       this.analyser.getByteTimeDomainData(this.timeData);
@@ -926,7 +937,7 @@ export class NebulaAudioEngine {
         const v = (this.timeData[i] - 128) / 128;
         acc += v * v;
       }
-      rawLevel = Math.min(1, Math.max(0, (Math.sqrt(acc / this.timeData.length) * 5 - 0.32) / 0.63));
+      rawLevel = Math.min(1, Math.max(0, (Math.sqrt(acc / this.timeData.length) * 5 - 0.2) / 0.5));
     }
 
     const k = 1 - Math.exp(-Math.max(0.001, dt) * 14);
