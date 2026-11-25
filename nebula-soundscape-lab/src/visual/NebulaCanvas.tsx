@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import {
   MORPH_DELAY_MAX,
   MORPH_DELAY_WIDTH,
@@ -11,6 +12,9 @@ import {
   nebulaVertexShader,
   starfieldFragmentShader,
   starfieldVertexShader,
+  fogVertexShader,
+  fogFragmentShader,
+  VignetteShader,
 } from './nebulaShaders';
 import { buildShape, type ShapeAttributes } from './shapeGenerators';
 import { PRESET_MAP } from './presets';
@@ -108,10 +112,14 @@ class NebulaEngine {
   private camera: THREE.PerspectiveCamera;
   private composer: EffectComposer;
   private bloom: UnrealBloomPass;
+  private vignette: ShaderPass;
   private points: THREE.Points;
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
   private starMaterial!: THREE.ShaderMaterial;
+  /** 体积雾云气层（低密度大尺寸软粒子，随 bass 呼吸） */
+  private fog!: THREE.Points;
+  private fogMaterial!: THREE.ShaderMaterial;
   private coreSprite: THREE.Sprite;
   private material: THREE.ShaderMaterial;
   private uniforms: Record<string, THREE.IUniform>;
@@ -166,6 +174,8 @@ class NebulaEngine {
 
   // 效价滑块：只改配色、不动几何；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
   private valenceMix: number | null = null;
+  /** 配色锁定源：'preset' 跟随预设/解析，'valence' 被滑块手动锁定 */
+  private colorSource: 'preset' | 'valence' = 'preset';
 
   // 相机
   private camTheta = 0.4;
@@ -302,11 +312,15 @@ class NebulaEngine {
     this.scene.add(this.coreSprite);
 
     this.buildStarfield();
+    this.buildFog();
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 1.1, 0.75, 0.12);
     this.composer.addPass(this.bloom);
+    this.vignette = new ShaderPass(VignetteShader);
+    this.vignette.uniforms.uAspect.value = w / h;
+    this.composer.addPass(this.vignette);
 
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
@@ -316,25 +330,30 @@ class NebulaEngine {
   // -------------------------------------------------------------- 几何
 
   /**
-   * 独立背景星野：半径 35~65 的球壳 THREE.Points，色温涵盖冷白 / 淡蓝 / 暖黄，
-   * 尺寸随机（少数亮星更大），只用一份轻量着色器做闪烁，主循环里整体缓慢微旋。
+   * 独立背景星野：两层球壳。内层 35~65 主星群（冷白/淡蓝/暖黄），外层 70~110 更远更暗的背景星；
+   * 少量亮星加大并带彩色色温（蓝/金/红）。只用一份轻量着色器闪烁，主循环整体缓慢微旋。
    */
   private buildStarfield(): void {
     const n = isMobileDevice() ? STARFIELD_COUNT.mobile : STARFIELD_COUNT.desktop;
-    const pos = new Float32Array(n * 3);
-    const col = new Float32Array(n * 3);
-    const size = new Float32Array(n);
-    const seed = new Float32Array(n);
+    const outer = Math.floor(n * 0.5); // 外层暗星数量
+    const total = n + outer;
+    const pos = new Float32Array(total * 3);
+    const col = new Float32Array(total * 3);
+    const size = new Float32Array(total);
+    const seed = new Float32Array(total);
     const tints: [number, number, number][] = [
       [0.82, 0.88, 1.0], // 冷白
       [0.66, 0.78, 1.0], // 淡蓝
       [1.0, 0.88, 0.68], // 暖黄
       [1, 1, 1],
     ];
-    const rMin = 35;
-    const rMax = 65;
-    for (let i = 0; i < n; i++) {
-      // 球壳内按体积均匀分布
+    // 少量彩色亮星色温
+    const brightTints: [number, number, number][] = [
+      [0.62, 0.74, 1.0], // 蓝
+      [1.0, 0.86, 0.5], // 金
+      [1.0, 0.55, 0.5], // 红
+    ];
+    const place = (i: number, rMin: number, rMax: number, dim: boolean): void => {
       const u = Math.random() * 2 - 1;
       const ph = Math.random() * Math.PI * 2;
       const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
@@ -342,14 +361,24 @@ class NebulaEngine {
       pos[i * 3] = r * st * Math.cos(ph);
       pos[i * 3 + 1] = r * u;
       pos[i * 3 + 2] = r * st * Math.sin(ph);
-      const t = tints[Math.floor(Math.random() * tints.length)];
-      const b = 0.55 + Math.random() * 0.45;
+      const bright = !dim && Math.random() < 0.06;
+      const t = bright
+        ? brightTints[Math.floor(Math.random() * brightTints.length)]
+        : tints[Math.floor(Math.random() * tints.length)];
+      const b = dim ? 0.18 + Math.random() * 0.22 : 0.55 + Math.random() * 0.45;
       col[i * 3] = t[0] * b;
       col[i * 3 + 1] = t[1] * b;
       col[i * 3 + 2] = t[2] * b;
-      size[i] = Math.random() < 0.06 ? 4 + Math.random() * 2.5 : 1.6 + Math.random() * 3.2;
+      size[i] = bright
+        ? 4 + Math.random() * 2.5
+        : dim
+          ? 0.9 + Math.random() * 1.6
+          : 1.6 + Math.random() * 3.2;
       seed[i] = Math.random();
-    }
+    };
+    for (let i = 0; i < n; i++) place(i, 35, 65, false);
+    for (let i = n; i < total; i++) place(i, 70, 110, true);
+
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
@@ -371,6 +400,53 @@ class NebulaEngine {
     this.starfield = new THREE.Points(geo, this.starMaterial);
     this.starfield.frustumCulled = false;
     this.scene.add(this.starfield);
+  }
+
+  /**
+   * 体积雾云气层：环绕星云的低密度大尺寸软粒子，呈半透明气态包裹。
+   * 数量远少于主粒子，尺寸大、透明度低，颜色取内核色的柔化版；随 bass 胀缩与变亮。
+   */
+  private buildFog(): void {
+    const n = isMobileDevice() ? 120 : 220;
+    const pos = new Float32Array(n * 3);
+    const size = new Float32Array(n);
+    const seed = new Float32Array(n);
+    const rMin = 1.4;
+    const rMax = 4.2;
+    for (let i = 0; i < n; i++) {
+      const u = Math.random() * 2 - 1;
+      const ph = Math.random() * Math.PI * 2;
+      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
+      const st = Math.sqrt(1 - u * u);
+      pos[i * 3] = r * st * Math.cos(ph);
+      pos[i * 3 + 1] = r * u * 0.8;
+      pos[i * 3 + 2] = r * st * Math.sin(ph);
+      size[i] = 6 + Math.random() * 9;
+      seed[i] = Math.random();
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+
+    this.fogMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uBass: { value: 0 },
+        uPixelRatio: { value: this.renderer.getPixelRatio() },
+        uColor: { value: new THREE.Color(this.preset.colors[0]) },
+        uMap: { value: this.texture },
+      },
+      vertexShader: fogVertexShader,
+      fragmentShader: fogFragmentShader,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.fog = new THREE.Points(geo, this.fogMaterial);
+    this.fog.frustumCulled = false;
+    this.scene.add(this.fog);
   }
 
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
@@ -535,7 +611,10 @@ class NebulaEngine {
     this.emotion = emotion;
     this.shapeId = preset.id;
 
-    this.targetColors = preset.colors.map((c) => new THREE.Color(c));
+    // 滑块锁定配色时，预设切换/解析配色不覆盖它；否则以预设色为基底（解析色随后由 overrideColors 覆写）
+    if (this.colorSource !== 'valence') {
+      this.targetColors = preset.colors.map((c) => new THREE.Color(c));
+    }
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
@@ -586,25 +665,27 @@ class NebulaEngine {
     );
   }
 
-  /** 覆盖目标调色板（心情解析生成的连续色） */
+  /** 覆盖目标调色板（心情解析生成的连续色）；滑块锁定时不覆写 */
   overrideColors(colors: THREE.Color[]): void {
-    if (colors.length === 3) {
+    if (colors.length === 3 && this.colorSource !== 'valence') {
       this.targetColors = colors;
     }
   }
 
   /**
    * 效价滑块：mix ∈ [-1,1]，-1 锚定深思/低落配色，1 锚定狂喜/明亮配色。
-   * 只在两端调色板间渐变，几何形状保持当前预设不变；传 null 关闭，回到当前预设配色。
+   * 只在两端调色板间渐变，几何形状保持当前预设不变；传 null 关闭，回到当前预设/解析配色。
    */
   setValenceMix(mix: number | null): void {
     if (mix === null) {
       this.valenceMix = null;
+      this.colorSource = 'preset';
       // 关闭滑块：回到当前预设/解析配色
       this.targetColors = this.preset.colors.map((c) => new THREE.Color(c));
       return;
     }
     this.valenceMix = Math.min(1, Math.max(-1, mix));
+    this.colorSource = 'valence';
     this.applyValenceColors();
   }
 
@@ -664,6 +745,7 @@ class NebulaEngine {
     this.renderer.setSize(w, h);
     this.composer.setSize(w, h);
     this.bloom.setSize(w, h);
+    this.vignette.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
   };
 
@@ -929,6 +1011,12 @@ class NebulaEngine {
     const starDim = 0.45 + this.grooveBass * 0.55;
     (this.starfield.material as THREE.ShaderMaterial).opacity = starDim;
 
+    // 体积雾：缓慢漂移，透明度与胀缩随 bass 呼吸，颜色跟随内核色
+    this.fogMaterial.uniforms.uTime.value = t;
+    this.fogMaterial.uniforms.uBass.value = this.grooveBass;
+    (this.fogMaterial.uniforms.uColor.value as THREE.Color).copy(this.uniformColors[0]).lerp(new THREE.Color('#ffffff'), 0.15);
+    this.fog.rotation.y -= dt * 0.002;
+
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
@@ -939,6 +1027,9 @@ class NebulaEngine {
     // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光
     const lift = this.grooveBass * 0.55 + this.grooveMid * 0.3;
     this.bloom.strength = this.bloomCurrent * 0.92 + lift + this.bloomKick;
+
+    // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
+    this.vignette.uniforms.uAmount.value = 0.36 + this.grooveBass * 0.12;
 
     // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢压暗（沿相机距离方向缩放粒子群）
     const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.06;
@@ -1019,6 +1110,8 @@ class NebulaEngine {
     this.points.geometry.dispose();
     this.starfield.geometry.dispose();
     this.starMaterial.dispose();
+    this.fog.geometry.dispose();
+    this.fogMaterial.dispose();
     this.material.dispose();
     this.coreSprite.material.dispose();
     this.texture.dispose();

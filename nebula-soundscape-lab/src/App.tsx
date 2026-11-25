@@ -170,6 +170,7 @@ export default function App() {
     setEmotion(null);
     setPalette(null);
     setLog(null);
+    setValence(null);
     setTurbulence(preset.turbulence);
     setSpeed(preset.speed);
   }, [preset]);

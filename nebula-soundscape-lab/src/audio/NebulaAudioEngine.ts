@@ -71,6 +71,8 @@ export class NebulaAudioEngine {
 
   private freqData: Uint8Array<ArrayBuffer> | null = null;
   private bands: AudioBands = { bass: 0, mid: 0, treble: 0 };
+  /** 各频段近期能量峰值（自适应归一化基准，缓慢回落） */
+  private bandPeak: AudioBands = { bass: 0.2, mid: 0.2, treble: 0.2 };
 
   get ready(): boolean {
     return !!this.ctx && this.ctx.state === 'running';
@@ -643,10 +645,23 @@ export class NebulaAudioEngine {
     const rawMid = Math.min(1, avg(150, 2000) * 1.8);
     const rawTreble = Math.min(1, avg(2000, sr / 2) * 2.8);
 
+    // 自适应归一化：跟踪近期峰值并缓慢回落，弱段也能被抬到可见起伏；峰值以下压暗避免过曝
+    const peakDecay = Math.exp(-dt * 0.8);
+    this.bandPeak.bass = Math.max(rawBass, this.bandPeak.bass * peakDecay);
+    this.bandPeak.mid = Math.max(rawMid, this.bandPeak.mid * peakDecay);
+    this.bandPeak.treble = Math.max(rawTreble, this.bandPeak.treble * peakDecay);
+    const norm = (raw: number, peak: number): number => {
+      const denom = Math.max(peak, 0.12);
+      return Math.min(1, (raw / denom) * 0.85);
+    };
+    const normBass = norm(rawBass, this.bandPeak.bass);
+    const normMid = norm(rawMid, this.bandPeak.mid);
+    const normTreble = norm(rawTreble, this.bandPeak.treble);
+
     const k = 1 - Math.exp(-Math.max(0.001, dt) * 14);
-    this.bands.bass += (rawBass - this.bands.bass) * k;
-    this.bands.mid += (rawMid - this.bands.mid) * k;
-    this.bands.treble += (rawTreble - this.bands.treble) * k;
+    this.bands.bass += (normBass - this.bands.bass) * k;
+    this.bands.mid += (normMid - this.bands.mid) * k;
+    this.bands.treble += (normTreble - this.bands.treble) * k;
 
     return this.bands;
   }
