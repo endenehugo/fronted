@@ -396,6 +396,8 @@ export function blendPalette(preset: NebulaPreset, e: EmotionVector): Palette {
 // ---------------------------------------------------------------- 观测日志
 
 const LOG_TEMPLATES: Record<PresetId, string[]> = {
+  // 待机大星系不会由最近邻匹配命中，仅用于补全 Record 类型
+  galaxy_idle: ['星系静默。'],
   serenity: [
     '星云以 {speed} 的转速缓缓舒展，旋臂之间流淌着 {note} 的余韵。',
     '低湍流，深呼吸。你看见的是一片被「{kw}」染透的静海。',

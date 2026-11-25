@@ -1,6 +1,8 @@
 /** 星云声景实验室 —— 全局类型定义 */
 
 export type PresetId =
+  /** 待机态：仙女座大星系（不是情绪星体，不参与最近邻匹配） */
+  | 'galaxy_idle'
   | 'serenity'
   | 'euphoria'
   | 'melancholy'

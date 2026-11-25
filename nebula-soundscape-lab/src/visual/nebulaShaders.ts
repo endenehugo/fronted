@@ -2,13 +2,20 @@
  * 星云粒子着色器（双缓冲形变版）
  *
  * 顶点：
- *   1. 双缓冲形变 position → aTargetPosition（cubic ease-in-out + 中段旋涡扭转）
+ *   1. 双缓冲形变 position → aTargetPosition（错峰 smoothstep + 三次缓出 + 中段旋涡扭转）
  *   2. 分形态动态物理 uBehavior（自转 / 径向脉冲 / 垂直升腾 / 湍流）
  *   3. 开普勒差速旋转 uShear
  *   4. 坍缩、超新星冲击波、指针引力旋涡、键盘星簇爆发
+ *   5. 颜色：待机星系的逐顶点色 aColor ↔ 情绪星体的 colorT 三段渐变，权重随 localT 错峰过渡
  *
  * 片元：径向高斯衰减 × 程序化高斯贴图，叠加混合
  */
+
+/** 形变总时长（秒）：2.8s「星际潜入」 */
+export const MORPH_DURATION = 2.8;
+/** 错峰延迟上限（delay = aRandom × 0.45）与延迟窗口宽度；二者之和 = 1，最迟粒子恰在 p = 1 落定 */
+export const MORPH_DELAY_MAX = 0.45;
+export const MORPH_DELAY_WIDTH = 0.55;
 
 const NOISE_GLSL = /* glsl */ `
 vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -91,6 +98,9 @@ attribute float aTargetSize;      // 目标尺寸
 attribute float aTargetRole;      // 目标角色权重
 attribute float aTargetColorT;    // 目标颜色梯度
 attribute float aRandom;          // 错峰飞行种子 0~1
+attribute vec3  aColor;           // 逐顶点颜色（待机星系的多色层次）
+attribute float aColorW;          // 顶点色权重：1 → aColor，0 → colorT 渐变
+attribute float aTargetColorW;    // 目标顶点色权重
 
 uniform float uTime;
 uniform float uMorphProgress;     // 0.0 → 1.0
@@ -130,9 +140,10 @@ void main() {
   // ================= 1. 双缓冲形变：错峰波浪 + 潮汐旋涡 =================
   float p = clamp(uMorphProgress, 0.0, 1.0);
 
-  // 1.1 每颗粒子错峰延迟（0.0 ~ 0.35），三次方缓出，落地更柔和
-  float delay = aRandom * 0.35;
-  float localT = smoothstep(delay, delay + 0.65, p);
+  // 1.1 每颗粒子错峰延迟（0.0 ~ 0.45），smoothstep 窗口 0.55，三次方缓出
+  //     延迟顺序由 aRandom 决定（待机星系按半径排序：核球先启航、旋臂后汇入）
+  float delay = aRandom * ${MORPH_DELAY_MAX};
+  float localT = smoothstep(delay, delay + ${MORPH_DELAY_WIDTH}, p);
   localT = 1.0 - pow(1.0 - localT, 3.0);
 
   // 1.2 纯线性基础插值（便于中途打断时 CPU 精确烘焙）
@@ -145,10 +156,11 @@ void main() {
   base.xz = mat2(cw, -sw, sw, cw) * base.xz;
   base *= (1.0 + abs(uTransitionSwirl) * 0.16);
 
-  // 1.4 尺寸 / 角色 / 颜色梯度与坐标同步插值，消除过渡结束时的跳变
+  // 1.4 尺寸 / 角色 / 颜色梯度 / 顶点色权重与坐标同步插值，消除过渡结束时的跳变
   float role = mix(aRole, aTargetRole, localT);
   float colorT = mix(aColorT, aTargetColorT, localT);
   float sizeT = mix(aSize, aTargetSize, localT);
+  float colorW = mix(aColorW, aTargetColorW, localT);
 
   // ================= 2. 分形态动态物理 =================
   float r = length(base.xz);
@@ -207,10 +219,12 @@ void main() {
   gl_Position = projectionMatrix * mv;
 
   // ================= 5. 颜色 =================
-  vec3 col = colorT < 0.5
+  // 情绪星体：colorT 三段渐变（uColors 逐帧向目标调色板阻尼，保留实时换色）
+  vec3 grad = colorT < 0.5
     ? mix(uColors[0], uColors[1], colorT * 2.0)
     : mix(uColors[1], uColors[2], (colorT - 0.5) * 2.0);
-  vColor = col;
+  // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
+  vColor = mix(grad, aColor, colorW);
 
   vGlow = (1.0 - colorT) * 0.4
         + role * 0.12
@@ -238,5 +252,45 @@ void main() {
   float a = tex.a * falloff * vAlpha;
   vec3 c = vColor * (0.45 + vGlow * 0.85);
   gl_FragColor = vec4(c, a);
+}
+`;
+
+/**
+ * 深空背景星野（常驻图层）：35~65 球壳上的恒星，尺寸随机、色温各异，
+ * 不参与星云形变，仅随场景缓慢微旋并按种子错相位闪烁。
+ */
+export const starfieldVertexShader = /* glsl */ `
+precision highp float;
+
+attribute vec3  aColor;
+attribute float aSize;
+attribute float aSeed;
+
+uniform float uTime;
+uniform float uPixelRatio;
+
+varying vec3  vColor;
+varying float vAlpha;
+
+void main() {
+  vColor = aColor;
+  vAlpha = 0.6 + 0.4 * sin(uTime * (0.35 + aSeed * 0.9) + aSeed * 40.0);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z));
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+export const starfieldFragmentShader = /* glsl */ `
+precision highp float;
+
+uniform sampler2D uMap;
+
+varying vec3  vColor;
+varying float vAlpha;
+
+void main() {
+  vec4 tex = texture2D(uMap, gl_PointCoord);
+  gl_FragColor = vec4(vColor, tex.a * vAlpha);
 }
 `;

@@ -3,7 +3,15 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { nebulaFragmentShader, nebulaVertexShader } from './nebulaShaders';
+import {
+  MORPH_DELAY_MAX,
+  MORPH_DELAY_WIDTH,
+  MORPH_DURATION,
+  nebulaFragmentShader,
+  nebulaVertexShader,
+  starfieldFragmentShader,
+  starfieldVertexShader,
+} from './nebulaShaders';
 import { buildShape, type ShapeAttributes } from './shapeGenerators';
 import type { EmotionVector, NebulaPreset, PresetId } from '../types';
 import { NebulaAudioEngine } from '../audio/NebulaAudioEngine';
@@ -41,10 +49,18 @@ const KEY_DEGREES: Record<string, number> = {
   l: 8,
 };
 
-const MORPH_DURATION = 2.0;
+/** 潮汐旋涡峰值强度（角度系数，中段最强、两端归零）；2.8s 长过渡下压到 1.1 保持柔和 */
+const SWIRL_AMP = 1.1;
 
-/** 潮汐旋涡峰值强度（角度系数，中段最强、两端归零） */
-const SWIRL_AMP = 1.7;
+/** 相机指数阻尼系数 λ：1.6 时 2.8s 内收敛到 99%，与「星际潜入」形变同长 */
+const CAM_DAMP = 1.6;
+
+/** 背景星野恒星数（桌面 / 移动） */
+const STARFIELD_COUNT = { desktop: 3500, mobile: 2000 };
+
+/** 切换预设瞬间的 Bloom 能量涌动：上浮量与连点封顶（防叠加爆白） */
+const BLOOM_KICK = 0.15;
+const BLOOM_KICK_MAX = 0.3;
 
 /** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
 const smoothstep01 = (e0: number, e1: number, x: number): number => {
@@ -90,6 +106,9 @@ class NebulaEngine {
   private composer: EffectComposer;
   private bloom: UnrealBloomPass;
   private points: THREE.Points;
+  /** 深空背景星野（常驻图层，不参与形变） */
+  private starfield!: THREE.Points;
+  private starMaterial!: THREE.ShaderMaterial;
   private coreSprite: THREE.Sprite;
   private material: THREE.ShaderMaterial;
   private uniforms: Record<string, THREE.IUniform>;
@@ -116,8 +135,14 @@ class NebulaEngine {
   private targetColors: THREE.Color[] = [];
   private uniformColors: THREE.Color[] = [];
 
-  private target = { turbulence: 1, speed: 1, bloom: 1 };
-  private current = { turbulence: 1, speed: 1, bloom: 1 };
+  // 视觉参数：切换回调只写 *Target，loop 内逐帧阻尼到 *Current，禁止直接突变
+  private bloomTarget = 1;
+  private bloomCurrent = 1;
+  private bloomKick = 0;
+  private sizeTarget = 1;
+  private sizeCurrent = 1;
+  private coreTarget = 0.4;
+  private coreCurrent = 0.4;
 
   // 分形态动态物理
   private behaviorTarget = new THREE.Vector4(0.2, 0.1, 0, 0.1);
@@ -266,6 +291,8 @@ class NebulaEngine {
     this.coreSprite.scale.set(1.6, 1.6, 1);
     this.scene.add(this.coreSprite);
 
+    this.buildStarfield();
+
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 1.1, 0.75, 0.12);
@@ -277,6 +304,64 @@ class NebulaEngine {
   }
 
   // -------------------------------------------------------------- 几何
+
+  /**
+   * 独立背景星野：半径 35~65 的球壳 THREE.Points，色温涵盖冷白 / 淡蓝 / 暖黄，
+   * 尺寸随机（少数亮星更大），只用一份轻量着色器做闪烁，主循环里整体缓慢微旋。
+   */
+  private buildStarfield(): void {
+    const n = isMobileDevice() ? STARFIELD_COUNT.mobile : STARFIELD_COUNT.desktop;
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    const size = new Float32Array(n);
+    const seed = new Float32Array(n);
+    const tints: [number, number, number][] = [
+      [0.82, 0.88, 1.0], // 冷白
+      [0.66, 0.78, 1.0], // 淡蓝
+      [1.0, 0.88, 0.68], // 暖黄
+      [1, 1, 1],
+    ];
+    const rMin = 35;
+    const rMax = 65;
+    for (let i = 0; i < n; i++) {
+      // 球壳内按体积均匀分布
+      const u = Math.random() * 2 - 1;
+      const ph = Math.random() * Math.PI * 2;
+      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
+      const st = Math.sqrt(1 - u * u);
+      pos[i * 3] = r * st * Math.cos(ph);
+      pos[i * 3 + 1] = r * u;
+      pos[i * 3 + 2] = r * st * Math.sin(ph);
+      const t = tints[Math.floor(Math.random() * tints.length)];
+      const b = 0.55 + Math.random() * 0.45;
+      col[i * 3] = t[0] * b;
+      col[i * 3 + 1] = t[1] * b;
+      col[i * 3 + 2] = t[2] * b;
+      size[i] = Math.random() < 0.06 ? 4 + Math.random() * 2.5 : 1.6 + Math.random() * 3.2;
+      seed[i] = Math.random();
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    this.starMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uPixelRatio: { value: this.renderer.getPixelRatio() },
+        uMap: { value: this.texture },
+      },
+      vertexShader: starfieldVertexShader,
+      fragmentShader: starfieldFragmentShader,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.starfield = new THREE.Points(geo, this.starMaterial);
+    this.starfield.frustumCulled = false;
+    this.scene.add(this.starfield);
+  }
 
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
     const geo = new THREE.BufferGeometry();
@@ -290,6 +375,9 @@ class NebulaEngine {
     geo.setAttribute('aColorT', new THREE.BufferAttribute(shape.colorT.slice(), 1));
     geo.setAttribute('aTargetColorT', new THREE.BufferAttribute(shape.colorT.slice(), 1));
     geo.setAttribute('aRandom', new THREE.BufferAttribute(shape.random.slice(), 1));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(shape.color.slice(), 3));
+    geo.setAttribute('aColorW', new THREE.BufferAttribute(shape.colorW.slice(), 1));
+    geo.setAttribute('aTargetColorW', new THREE.BufferAttribute(shape.colorW.slice(), 1));
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 60);
     return geo;
   }
@@ -324,6 +412,10 @@ class NebulaEngine {
     write('aTargetSize', next.size);
     write('aTargetRole', next.role);
     write('aTargetColorT', next.colorT);
+    write('aTargetColorW', next.colorW);
+    // 目标形态使用逐顶点色（待机大星系）时才覆写 aColor：
+    // 情绪星体的 colorW = 0，aColor 对渲染无影响，可直接当作「目标顶点色」容器
+    if (next.colorW.some((w) => w > 0)) write('aColor', next.color);
 
     this.morphProgress = 0;
     this.morphActive = true;
@@ -338,6 +430,8 @@ class NebulaEngine {
   /**
    * 中途打断时，把着色器里「错峰插值 + 潮汐旋涡」的结果精确烘焙回当前缓冲。
    * 必须逐粒子复现 localT（延迟 + smoothstep + 三次缓出），否则打断瞬间会跳变。
+   * 颜色状态由 aColorT + aColorW 精确承载（vColor = mix(grad(colorT), aColor, colorW)），
+   * 烘焙后 aColor 不需逐粒子改写即可保证零闪烁。
    */
   private bakeMorphSnapshot(): void {
     const geo = this.points.geometry;
@@ -353,8 +447,8 @@ class NebulaEngine {
     const n = rnd.length;
 
     for (let i = 0; i < n; i++) {
-      const delay = rnd[i] * 0.35;
-      let lt = smoothstep01(delay, delay + 0.65, p);
+      const delay = rnd[i] * MORPH_DELAY_MAX;
+      let lt = smoothstep01(delay, delay + MORPH_DELAY_WIDTH, p);
       lt = 1 - Math.pow(1 - lt, 3);
 
       const i3 = i * 3;
@@ -385,8 +479,8 @@ class NebulaEngine {
       const ca = cur.array as Float32Array;
       const ta = tgt.array as Float32Array;
       for (let i = 0; i < n; i++) {
-        const delay = rnd[i] * 0.35;
-        let lt = smoothstep01(delay, delay + 0.65, p);
+        const delay = rnd[i] * MORPH_DELAY_MAX;
+        let lt = smoothstep01(delay, delay + MORPH_DELAY_WIDTH, p);
         lt = 1 - Math.pow(1 - lt, 3);
         ca[i] = ca[i] + (ta[i] - ca[i]) * lt;
       }
@@ -395,6 +489,7 @@ class NebulaEngine {
     bakeScalar('aSize', 'aTargetSize');
     bakeScalar('aRole', 'aTargetRole');
     bakeScalar('aColorT', 'aTargetColorT');
+    bakeScalar('aColorW', 'aTargetColorW');
   }
 
   /** 过渡结束：把目标缓冲同步回当前缓冲 */
@@ -405,6 +500,7 @@ class NebulaEngine {
       ['aSize', 'aTargetSize'],
       ['aRole', 'aTargetRole'],
       ['aColorT', 'aTargetColorT'],
+      ['aColorW', 'aTargetColorW'],
     ];
     for (const [curName, tgtName] of pairs) {
       const cur = geo.getAttribute(curName) as THREE.BufferAttribute;
@@ -430,11 +526,11 @@ class NebulaEngine {
     this.shapeId = preset.id;
 
     this.targetColors = preset.colors.map((c) => new THREE.Color(c));
-    this.target.turbulence = preset.turbulence;
-    this.target.speed = preset.speed;
-    this.target.bloom = preset.bloom;
-
-    this.uniforms.uSize.value = preset.sizeScale;
+    this.bloomTarget = preset.bloom;
+    this.sizeTarget = preset.sizeScale;
+    this.coreTarget = preset.core;
+    // Bloom 能量涌动：只上浮当前值，目标值不动，随后指数回落到预设值
+    if (!immediate) this.bloomKick = Math.min(this.bloomKick + BLOOM_KICK, BLOOM_KICK_MAX);
 
     // 分形态动态物理（预设基线 × 心情缩放）
     this.motionScale = { turbulence: 1, speed: 1 };
@@ -450,7 +546,10 @@ class NebulaEngine {
     this.userCam = false;
 
     if (immediate) {
-      this.current = { ...this.target };
+      this.bloomCurrent = this.bloomTarget;
+      this.sizeCurrent = this.sizeTarget;
+      this.coreCurrent = this.coreTarget;
+      this.uniforms.uSize.value = this.sizeCurrent;
       this.behaviorCurrent.copy(this.behaviorTarget);
       this.shearCurrent = this.shearTarget;
       this.camTheta = this.camThetaTarget;
@@ -698,18 +797,21 @@ class NebulaEngine {
     this.uniforms.uMid.value = bands.mid;
     this.uniforms.uTreble.value = bands.treble;
 
-    // 参数插值（约 1.5s 完成）
-    const k = 1 - Math.exp(-dt * 2.7);
-    this.current.bloom += (this.target.bloom - this.current.bloom) * k;
+    // 视觉参数逐帧指数阻尼（MathUtils.damp 即 1 - exp(-lambda·dt)，帧率无关）
+    this.bloomCurrent = THREE.MathUtils.damp(this.bloomCurrent, this.bloomTarget, 3.0, dt);
+    this.bloomKick *= Math.exp(-dt * 1.8);
+    this.sizeCurrent = THREE.MathUtils.damp(this.sizeCurrent, this.sizeTarget, 3.0, dt);
+    this.uniforms.uSize.value = this.sizeCurrent;
+    this.coreCurrent = THREE.MathUtils.damp(this.coreCurrent, this.coreTarget, 3.0, dt);
 
     this.uniformColors.forEach((c, idx) => {
-      c.lerp(this.targetColors[idx] ?? c, k);
+      c.lerp(this.targetColors[idx] ?? c, 1 - Math.exp(-3.2 * dt));
     });
 
     // 分形态动态物理
-    this.behaviorCurrent.lerp(this.behaviorTarget, 1 - Math.exp(-dt * 2.4));
+    this.behaviorCurrent.lerp(this.behaviorTarget, 1 - Math.exp(-3.0 * dt));
     this.uniforms.uBehavior.value.copy(this.behaviorCurrent);
-    this.shearCurrent += (this.shearTarget - this.shearCurrent) * (1 - Math.exp(-dt * 2.4));
+    this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
     // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
@@ -759,11 +861,11 @@ class NebulaEngine {
       this.velPhi *= 0.92;
     }
     if (!this.userCam) {
-      const ck2 = 1 - Math.exp(-dt * 2.2);
       this.camThetaTarget += dt * 0.022; // 缓慢环绕，保持画面生命感
-      this.camTheta += (this.camThetaTarget - this.camTheta) * ck2;
-      this.camPhi += (this.camPhiTarget - this.camPhi) * ck2;
-      this.camDist += (this.camDistTarget - this.camDist) * ck2;
+      // 星际潜入：待机全景 [0, 1.8, 9.2] → 星体特写，λ=1.6 的指数阻尼与 2.8s 形变同长
+      this.camTheta = THREE.MathUtils.damp(this.camTheta, this.camThetaTarget, CAM_DAMP, dt);
+      this.camPhi = THREE.MathUtils.damp(this.camPhi, this.camPhiTarget, CAM_DAMP, dt);
+      this.camDist = THREE.MathUtils.damp(this.camDist, this.camDistTarget, CAM_DAMP, dt);
     }
     const r = this.camDist;
     this.camera.position.set(
@@ -773,15 +875,19 @@ class NebulaEngine {
     );
     this.camera.lookAt(0, 0, 0);
 
+    // 背景星野：缓慢微旋 + 错相位闪烁
+    this.starfield.rotation.y += dt * 0.004;
+    this.starMaterial.uniforms.uTime.value = t;
+
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
-    const coreK = this.preset.core;
+    const coreK = this.coreCurrent;
     this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6) * (0.3 + coreK * 0.8));
     coreMat.opacity = (0.08 + bands.bass * 0.12) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
     // Bloom 随低频脉动
-    this.bloom.strength = this.current.bloom * 0.92 + bands.bass * 0.95;
+    this.bloom.strength = this.bloomCurrent * 0.92 + bands.bass * 0.95 + this.bloomKick;
 
     // 帧率监控：低帧率自动降级
     this.warmup += dt;
@@ -810,10 +916,12 @@ class NebulaEngine {
         shock: this.shockActive,
       });
       this.lowFpsStreak = !throttled && fps < 42 ? this.lowFpsStreak + 1 : 0;
+      // 形变进行中不降级：重建几何会把粒子直接瞬移到目标形态，等落定后再降
       if (
         this.warmup > 3 &&
         this.lowFpsStreak >= 3 &&
         this.count > 8000 &&
+        !this.morphActive &&
         !this.downgraded
       ) {
         this.downgraded = true;
@@ -853,6 +961,8 @@ class NebulaEngine {
     if (this.collapseTimer !== null) window.clearTimeout(this.collapseTimer);
     this.resizeObserver?.disconnect();
     this.points.geometry.dispose();
+    this.starfield.geometry.dispose();
+    this.starMaterial.dispose();
     this.material.dispose();
     this.coreSprite.material.dispose();
     this.texture.dispose();

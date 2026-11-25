@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PRESETS, getPreset } from './visual/presets';
+import { ArrowLeft } from 'lucide-react';
+import { GALAXY_IDLE, INSPIRATIONS, PRESETS, getPreset } from './visual/presets';
 import { NebulaCanvas, type NebulaCanvasHandle } from './visual/NebulaCanvas';
 import LaunchOverlay from './components/LaunchOverlay';
 import ControlDock from './components/ControlDock';
@@ -18,12 +19,13 @@ interface Stats {
 export default function App() {
   const [ignited, setIgnited] = useState(false);
   const [launched, setLaunched] = useState(false);
-  const [presetId, setPresetId] = useState<PresetId>('serenity');
+  // 初始即为待机态：仙女座大星系
+  const [presetId, setPresetId] = useState<PresetId>(GALAXY_IDLE.id);
   const [input, setInput] = useState('');
   const [emotion, setEmotion] = useState<EmotionVector | null>(null);
   const [palette, setPalette] = useState<Palette | null>(null);
-  const [turbulence, setTurbulence] = useState(1);
-  const [speed, setSpeed] = useState(1);
+  const [turbulence, setTurbulence] = useState(GALAXY_IDLE.turbulence);
+  const [speed, setSpeed] = useState(GALAXY_IDLE.speed);
   const [log, setLog] = useState<string | null>(null);
   const [postcard, setPostcard] = useState<string | null>(null);
   const [postcardMood, setPostcardMood] = useState('');
@@ -37,6 +39,7 @@ export default function App() {
   const canvasRef = useRef<NebulaCanvasHandle>(null);
   const audio = useMemo(() => NebulaAudioEngine.getInstance(), []);
   const preset = useMemo(() => getPreset(presetId), [presetId]);
+  const isIdle = presetId === GALAXY_IDLE.id;
 
   // ---- 启动时还原 URL Hash 状态 ----
   useEffect(() => {
@@ -80,7 +83,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [presetId, input, palette, turbulence, speed, emotion, launched, preset.colors]);
 
-  // ---- 唤醒星云 ----
+  // ---- 唤醒星云：解锁音频，从奇点展开为待机大星系 ----
   const handleLaunch = useCallback(async () => {
     if (ignited) return;
     setIgnited(true);
@@ -95,7 +98,35 @@ export default function App() {
     window.setTimeout(() => setLaunched(true), 1500);
   }, [ignited, preset, audio, muted, volume]);
 
-  // ---- 预设切换 ----
+  // ---- 心情解析：文本 → 情绪向量 → 最近邻星体 + 调色板 + 观测日志 ----
+  const runAnalyze = useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const res = analyzeEmotion(trimmed);
+      setEmotion(res.vector);
+      setPresetId(res.preset.id);
+      setPalette(res.colors);
+      setTurbulence(res.turbulence);
+      setSpeed(res.speed);
+      setLog(res.log);
+      audio.setPreset(res.preset);
+    },
+    [audio],
+  );
+
+  const handleAnalyze = useCallback(() => runAnalyze(input), [input, runAnalyze]);
+
+  // 灵感词胶囊：等同于输入该词并回车
+  const handleInspire = useCallback(
+    (word: string) => {
+      setInput(word);
+      runAnalyze(word);
+    },
+    [runAnalyze],
+  );
+
+  // ---- 切换星体（星体态胶囊，不经过情绪解析） ----
   const handleSelectPreset = useCallback(
     (id: PresetId) => {
       const p = getPreset(id);
@@ -110,19 +141,16 @@ export default function App() {
     [audio],
   );
 
-  // ---- 心情解析 ----
-  const handleAnalyze = useCallback(() => {
-    const text = input.trim();
-    if (!text) return;
-    const res = analyzeEmotion(text);
-    setEmotion(res.vector);
-    setPresetId(res.preset.id);
-    setPalette(res.colors);
-    setTurbulence(res.turbulence);
-    setSpeed(res.speed);
-    setLog(res.log);
-    audio.setPreset(res.preset);
-  }, [input, audio]);
+  // ---- 返回大星系：目标切回待机态，相机与粒子在 2.8s 内缓缓退回宏观总览 ----
+  const handleBackToGalaxy = useCallback(() => {
+    setPresetId(GALAXY_IDLE.id);
+    setEmotion(null);
+    setPalette(null);
+    setLog(null);
+    setTurbulence(GALAXY_IDLE.turbulence);
+    setSpeed(GALAXY_IDLE.speed);
+    audio.setPreset(GALAXY_IDLE);
+  }, [audio]);
 
   const handleClear = useCallback(() => {
     setInput('');
@@ -228,7 +256,17 @@ export default function App() {
           <div className="text-[9px] tracking-[0.38em] text-white/35 sm:text-[10px]">
             NEBULA SOUNDSCAPE LAB
           </div>
-          <div className="mt-1 text-[13px] text-white/85 sm:text-[14px]">{preset.name}</div>
+          {launched && !isIdle ? (
+            <button
+              onClick={handleBackToGalaxy}
+              className="animate-fade-in pointer-events-auto mt-2 flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.06] px-3.5 py-1.5 text-[12px] text-white/80 backdrop-blur-xl transition-all hover:border-white/35 hover:bg-white/15 hover:text-white"
+            >
+              <ArrowLeft size={13} />
+              返回大星系
+            </button>
+          ) : (
+            <div className="mt-1 text-[13px] text-white/85 sm:text-[14px]">{preset.name}</div>
+          )}
         </div>
         <div className="animate-fade-in text-right" style={{ animationDelay: '150ms' }}>
           <div className="text-[9px] tracking-[0.24em] text-white/35 sm:text-[10px]">SCALE</div>
@@ -249,6 +287,24 @@ export default function App() {
         </div>
       </header>
 
+      {/* 待机态：极简标题与副标题 */}
+      {launched && isIdle && (
+        <div className="pointer-events-none fixed inset-x-0 top-[14%] z-30 flex flex-col items-center px-6 text-center">
+          <div className="animate-fade-in text-[9px] tracking-[0.5em] text-white/30 sm:text-[10px]">
+            MESSIER 31 · ANDROMEDA
+          </div>
+          <h1
+            key="hero"
+            className="animate-fade-up mt-3 text-[clamp(18px,2.6vw,28px)] font-light leading-snug tracking-[0.12em] text-white/90 [animation-delay:120ms]"
+          >
+            在群星之间写下此刻的心绪
+          </h1>
+          <p className="animate-fade-up mt-2 text-[12px] tracking-[0.08em] text-white/40 [animation-delay:240ms]">
+            输入任意心情，回车潜入属于它的星云
+          </p>
+        </div>
+      )}
+
       {/* 星云观测日志 */}
       {log && (
         <div key={log} className="pointer-events-none fixed inset-x-0 top-[84px] z-40 flex justify-center px-4">
@@ -262,9 +318,13 @@ export default function App() {
       {/* 底部控制栏 */}
       {launched && (
         <ControlDock
+          mode={isIdle ? 'idle' : 'body'}
+          preset={preset}
+          inspirations={INSPIRATIONS}
           presets={PRESETS}
           activeId={presetId}
           onSelect={handleSelectPreset}
+          onInspire={handleInspire}
           value={input}
           onChange={setInput}
           onSubmit={handleAnalyze}
