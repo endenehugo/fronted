@@ -1009,7 +1009,7 @@ class NebulaEngine {
     // 背景星野：缓慢微旋 + 错相位闪烁；整体明度随 bass 呼吸，低落时压暗
     this.starfield.rotation.y += dt * 0.004;
     this.starMaterial.uniforms.uTime.value = t;
-    const starDim = 0.45 + this.grooveBass * 0.55;
+    const starDim = 0.32 + this.grooveBass * 0.38;
     (this.starfield.material as THREE.ShaderMaterial).opacity = starDim;
 
     // 体积雾：缓慢漂移，透明度与胀缩随 bass 呼吸，颜色跟随内核色
@@ -1022,12 +1022,12 @@ class NebulaEngine {
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
     this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6) * (0.3 + coreK * 0.8));
-    coreMat.opacity = (0.04 + bands.bass * 0.11) * coreK;
+    coreMat.opacity = (0.03 + bands.bass * 0.08) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
     // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光
-    const lift = this.grooveBass * 0.4 + this.grooveMid * 0.22;
-    this.bloom.strength = this.bloomCurrent * 0.78 + lift + this.bloomKick;
+    const lift = this.grooveBass * 0.3 + this.grooveMid * 0.16;
+    this.bloom.strength = this.bloomCurrent * 0.6 + lift + this.bloomKick;
 
     // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
     this.vignette.uniforms.uAmount.value = 0.36 + this.grooveBass * 0.12;

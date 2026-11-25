@@ -226,12 +226,12 @@ void main() {
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
   vColor = mix(grad, aColor, colorW);
 
-  vGlow = (1.0 - colorT) * 0.4
-        + role * 0.12
-        + uBass * 0.35 * (1.0 - colorT)
-        + burst * 2.4
-        + wave * 1.4;
-  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade;
+  vGlow = (1.0 - colorT) * 0.26
+        + role * 0.08
+        + uBass * 0.22 * (1.0 - colorT)
+        + burst * 1.8
+        + wave * 1.0;
+  vAlpha = (0.14 + 0.5 * (1.0 - colorT * 0.55)) * fade;
 }
 `;
 
@@ -250,7 +250,7 @@ void main() {
   float d = length(uv) * 2.0;
   float falloff = exp(-d * d * 2.4);
   float a = tex.a * falloff * vAlpha;
-  vec3 c = vColor * (0.45 + vGlow * 0.85);
+  vec3 c = vColor * (0.3 + vGlow * 0.55);
   gl_FragColor = vec4(c, a);
 }
 `;
@@ -331,7 +331,7 @@ void main() {
   gl_Position = projectionMatrix * mv;
 
   // 透明度：基础低透明，bass 轻微托起；越靠外越淡
-  vAlpha = 0.045 + uBass * 0.05;
+  vAlpha = 0.028 + uBass * 0.03;
 }
 `;
 
