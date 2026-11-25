@@ -73,15 +73,6 @@ export function scaleDisplayName(preset: NebulaPreset, scaleId: ScaleId = 'prese
   return `${root} ${SCALE_MAP[scaleId].name}`;
 }
 
-/**
- * Drone 铺底音：[根音, 纯五度, 高八度]，根音比预设主音高一个八度
- * （预设主音在 C2~C3 区间，直接用会形成恒定的次低频嗡声）。
- */
-export function presetDrone(preset: NebulaPreset): [number, number, number] {
-  const root = midiToFreq(preset.root + 12);
-  return [root, root * 1.5, root * 2];
-}
-
 /** 超新星爆发使用的和弦音级（以音阶下标表示） */
 export const SUPERNOVA_CHORD = [0, 2, 4, 6, 8, 12];
 

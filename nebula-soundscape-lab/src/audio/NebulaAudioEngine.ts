@@ -1,11 +1,11 @@
 import type { NebulaPreset, ScaleId, TimbreId } from '../types';
-import { presetDrone, presetScale } from './scales';
+import { presetScale } from './scales';
 
 export interface AudioBands {
   bass: number;
   mid: number;
   treble: number;
-  /** 总 RMS 音量（0~1，已扣除 Drone 本底并按高潮段满刻度归一化；静音为 0） */
+  /** 总 RMS 音量（0~1，已扣除铺底本底并按高潮段满刻度归一化；静音为 0） */
   level: number;
   /** 旋律潮汐强度（0~1，14s 周期） */
   tide: number;
@@ -30,13 +30,6 @@ const TIMBRE_GAIN: Record<TimbreId, number> = {
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
-interface DroneLayer {
-  oscs: OscillatorNode[];
-  filter: BiquadFilterNode;
-  gain: GainNode;
-  lfo: OscillatorNode;
-}
-
 interface WindLayer {
   src: AudioBufferSourceNode;
   filter: BiquadFilterNode;
@@ -51,11 +44,13 @@ interface Riser {
 /**
  * NebulaAudioEngine —— 程序化星际合成器（单例）
  *
- * 四层声音架构：
- *  1. Ambient Drone   深空环境铺底（微失谐振荡器 + 低通 + LFO）
+ * 三层声音架构：
+ *  1. Solar Wind      深空环境铺底（粉红噪声 + 带通滤波，非纯音，随潮汐起伏）
  *  2. Generative Chimes 自动星辰旋律（马尔可夫音级游走 + 14s 潮汐密度曲线 + 立体声延迟）
  *  3. Interactive Synth 交互即时响应（8 种纯程序化音色，见 playNote）
- *  4. Solar Wind      宇宙背景噪波（粉红噪声 + 带通滤波）
+ *
+ * 注意：曾有第四层「Ambient Drone」（三个持续正弦波叠成的和声）。
+ * 任何持续的纯音在听感上都是嗡嗡声，调音高 / 降音量只能减轻，已整层移除。
  *
  * 所有声音均由 Web Audio API 实时合成，零外部音频资源。
  * 所有增益包络都从 0.0001 指数爬坡、再指数回落到 0.0001，杜绝爆音。
@@ -79,7 +74,6 @@ export class NebulaAudioEngine {
   private fbL!: GainNode;
   private fbR!: GainNode;
 
-  private drone: DroneLayer | null = null;
   private wind: WindLayer | null = null;
   private riser: Riser | null = null;
   /** 生成旋律总线：待机态压低、进入星体后随低通一起渐入（键盘 / 点击等交互音不走此总线） */
@@ -94,8 +88,8 @@ export class NebulaAudioEngine {
   private timbreLocked = false;
   /** 进行中的发声数（用于 MAX_VOICES 限流） */
   private voices = 0;
-  /** 潜入过渡期间 Drone 让位给过渡音，此时间戳之前不做潮汐推升 */
-  private droneHoldUntil = 0;
+  /** 潜入过渡期间太阳风让位给过渡音，此时间戳之前不做潮汐推升 */
+  private windHoldUntil = 0;
   private volume = 0.75;
   private schedulerId: number | null = null;
   private nextNoteTime = 0;
@@ -163,7 +157,6 @@ export class NebulaAudioEngine {
 
     this.buildReverb();
     this.buildMelodyBus();
-    this.buildDrone();
     this.buildWind();
     this.setPreset(preset);
     this.startScheduler();
@@ -232,61 +225,6 @@ export class NebulaAudioEngine {
     this.melody = g;
   }
 
-  /**
-   * Ambient Drone：微失谐正弦 + 纯五度 + 低通 + 极慢 LFO。
-   * 全部用正弦（三角波的三次谐波会在 294Hz 形成「嗡里带滋」的尖峰），
-   * 并在总线加 90Hz 高通切掉次低频，避免恒定的低沉嗡声。
-   */
-  private buildDrone(): void {
-    const ctx = this.ctx!;
-    const gain = ctx.createGain();
-    gain.gain.value = 0.16;
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 520;
-    filter.Q.value = 0.7;
-
-    // 次低频滚降：65Hz 以下的持续嗡声在人耳里只剩「难受」，没有音乐信息
-    const highpass = ctx.createBiquadFilter();
-    highpass.type = 'highpass';
-    highpass.frequency.value = 90;
-    highpass.Q.value = 0.5;
-
-    const lfo = ctx.createOscillator();
-    lfo.frequency.value = 0.05;
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.value = 180;
-    lfo.connect(lfoGain);
-    lfoGain.connect(filter.frequency);
-
-    const defs = [
-      { type: 'sine' as OscillatorType, detune: -4, gain: 0.55 },
-      { type: 'sine' as OscillatorType, detune: 4, gain: 0.32 },
-      { type: 'sine' as OscillatorType, detune: 0, gain: 0.2 },
-    ];
-
-    const oscs: OscillatorNode[] = [];
-    for (const d of defs) {
-      const osc = ctx.createOscillator();
-      osc.type = d.type;
-      osc.detune.value = d.detune;
-      const g = ctx.createGain();
-      g.gain.value = d.gain;
-      osc.connect(g);
-      g.connect(filter);
-      osc.start();
-      oscs.push(osc);
-    }
-
-    filter.connect(highpass);
-    highpass.connect(gain);
-    gain.connect(this.master);
-    lfo.start();
-
-    this.drone = { oscs, filter, gain, lfo };
-  }
-
   /** Solar Wind：内存生成粉红噪波 + 带通滤波 */
   private buildWind(): void {
     const ctx = this.ctx!;
@@ -350,25 +288,13 @@ export class NebulaAudioEngine {
     const t = this.ctx.currentTime;
 
     // 预设切换的全部持续参数都走 setTargetAtTime（指数滑音，起点取当前值，无爆音）。
-    // 待机大星系：低通压到 320Hz、Drone 加厚、生成旋律近乎静默 → 低频宽广的深空铺底；
-    // 进入情绪星体：低通 τ=0.6 缓缓打开到 1400Hz（≈2.5s 完成 98%），旋律总线同步渐入。
-    // Drone 音高 τ=0.55，落在 2.8s 画面形变的前半段，声音先落定但不抢拍。
+    // 待机大星系：太阳风压低、带通收窄、生成旋律近乎静默 → 稀疏的深空铺底；
+    // 进入情绪星体：带通 τ=0.6 缓缓打开（≈2.5s 完成 98%），旋律总线同步渐入。
     const idle = preset.id === 'galaxy_idle';
     const tau = 0.6;
-    if (this.drone) {
-      const [root, fifth, octave] = presetDrone(preset);
-      const freqs = [root, fifth, octave];
-      this.drone.oscs.forEach((osc, i) => {
-        osc.frequency.cancelScheduledValues(t);
-        osc.frequency.setTargetAtTime(freqs[i] ?? root, t, 0.55);
-      });
-      this.drone.filter.frequency.setTargetAtTime(idle ? 320 : 1400, t, tau);
-      this.drone.gain.gain.setTargetAtTime(this.droneGainTarget(preset), t, tau);
-    }
-
     if (this.wind) {
-      this.wind.gain.gain.setTargetAtTime(idle ? 0.012 : 0.018 + preset.turbulence * 0.055, t, tau);
-      this.wind.filter.frequency.setTargetAtTime(idle ? 260 : 380 + preset.speed * 620, t, tau);
+      this.wind.gain.gain.setTargetAtTime(this.windGainTarget(preset), t, tau);
+      this.wind.filter.frequency.setTargetAtTime(idle ? 300 : 380 + preset.speed * 620, t, tau);
     }
 
     this.melody?.gain.setTargetAtTime(idle ? 0.08 : 1, t, tau);
@@ -398,9 +324,9 @@ export class NebulaAudioEngine {
     return this.ctx ? this.tideAt(this.ctx.currentTime) : 0;
   }
 
-  /** Drone 增益目标：铺底只做背景，不盖过旋律 */
-  private droneGainTarget(preset: NebulaPreset): number {
-    return preset.id === 'galaxy_idle' ? 0.09 : 0.075 + preset.turbulence * 0.03;
+  /** 太阳风增益目标：铺底只做背景，不盖过旋律 */
+  private windGainTarget(preset: NebulaPreset): number {
+    return preset.id === 'galaxy_idle' ? 0.022 : 0.026 + preset.turbulence * 0.03;
   }
 
   setVolume(v: number): void {
@@ -425,8 +351,8 @@ export class NebulaAudioEngine {
       const now = this.ctx.currentTime;
       const bpm = this.preset.bpm;
       const step = 60 / bpm / 2; // 八分音符
-      // 潮汐推升：高潮时底层 Drone 音量随之上涨（τ=0.4 平滑，潜入过渡期间让位）
-      this.pushDrone(this.tideAt(now), now);
+      // 潮汐推升：高潮时太阳风铺底音量随之上涨（τ=0.4 平滑，潜入过渡期间让位）
+      this.pushWind(this.tideAt(now), now);
       while (this.nextNoteTime < now + 0.35) {
         this.scheduleStep(this.nextNoteTime, step);
         this.nextNoteTime += step;
@@ -448,11 +374,11 @@ export class NebulaAudioEngine {
     this.scheduleChime(time, tide);
   }
 
-  /** Drone 潮汐推升：高潮最多抬到基线的 1.5 倍（再高就变成周期性的低频轰鸣），低潮回到基线 */
-  private pushDrone(tide: number, now: number): void {
-    if (!this.drone || !this.preset || now < this.droneHoldUntil) return;
-    const target = this.droneGainTarget(this.preset) * (1 + tide * 0.5);
-    this.drone.gain.gain.setTargetAtTime(target, now, 0.4);
+  /** 太阳风潮汐推升：高潮最多抬到基线的 1.8 倍，低潮回到基线 */
+  private pushWind(tide: number, now: number): void {
+    if (!this.wind || !this.preset || now < this.windHoldUntil) return;
+    const target = this.windGainTarget(this.preset) * (1 + tide * 0.8);
+    this.wind.gain.gain.setTargetAtTime(target, now, 0.4);
   }
 
   /**
@@ -793,7 +719,7 @@ export class NebulaAudioEngine {
   /**
    * 形变过渡音效：与画面 2.8s「星际潜入」同步的「星尘气流 + 低频涌动」。
    * 噪声带通中心频率先上扫再回落，低频从 48Hz 涌到 96Hz 再沉回 42Hz，
-   * 同时让 Drone 层轻微避让，把中频让给过渡音。
+   * 同时让太阳风铺底轻微避让，把中频让给过渡音。
    */
   transition(duration = 2.8): void {
     if (!this.ctx) return;
@@ -835,13 +761,13 @@ export class NebulaAudioEngine {
     sub.start(t);
     sub.stop(t + d + 0.1);
 
-    // Drone 避让：过渡期间压低，落定后按当前预设回位；避让窗口内潮汐推升不介入
-    if (this.drone) {
-      const back = this.preset ? this.droneGainTarget(this.preset) : 0.15;
-      this.drone.gain.gain.cancelScheduledValues(t);
-      this.drone.gain.gain.setTargetAtTime(0.065, t, 0.16);
-      this.drone.gain.gain.setTargetAtTime(back, t + d * 0.78, 0.5);
-      this.droneHoldUntil = t + d * 0.78;
+    // 太阳风避让：过渡期间压低，落定后按当前预设回位；避让窗口内潮汐推升不介入
+    if (this.wind) {
+      const back = this.preset ? this.windGainTarget(this.preset) : 0.02;
+      this.wind.gain.gain.cancelScheduledValues(t);
+      this.wind.gain.gain.setTargetAtTime(0.006, t, 0.16);
+      this.wind.gain.gain.setTargetAtTime(back, t + d * 0.78, 0.5);
+      this.windHoldUntil = t + d * 0.78;
     }
   }
 
@@ -927,8 +853,8 @@ export class NebulaAudioEngine {
     const rawMid = Math.min(1, avg(150, 2000) * 1.8);
     const rawTreble = Math.min(1, avg(2000, sr / 2) * 2.8);
 
-    // 总 RMS：时域样本偏离中值（128）的均方根。×5 后扣掉纯 Drone 铺底的本底（≈0.2）、
-    // 以高潮段（≈0.7）为满刻度，使低潮 ≈0.1、高潮 ≈1，静音时归零
+    // 总 RMS：时域样本偏离中值（128）的均方根。×5 后扣掉纯铺底的本底（≈0.12）、
+    // 以高潮段（≈0.57）为满刻度，使低潮 ≈0.1、高潮 ≈1，静音时归零
     let rawLevel = 0;
     if (this.timeData) {
       this.analyser.getByteTimeDomainData(this.timeData);
@@ -937,7 +863,7 @@ export class NebulaAudioEngine {
         const v = (this.timeData[i] - 128) / 128;
         acc += v * v;
       }
-      rawLevel = Math.min(1, Math.max(0, (Math.sqrt(acc / this.timeData.length) * 5 - 0.2) / 0.5));
+      rawLevel = Math.min(1, Math.max(0, (Math.sqrt(acc / this.timeData.length) * 5 - 0.12) / 0.45));
     }
 
     const k = 1 - Math.exp(-Math.max(0.001, dt) * 14);

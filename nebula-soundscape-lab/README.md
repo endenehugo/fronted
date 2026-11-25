@@ -71,7 +71,7 @@ src/
 - **独立背景星野**（`starfield*Shader`）：35~65 球壳上的常驻恒星，色温各异，不参与形变，仅缓慢微旋。
 - **星际潜入**：`MORPH_DURATION = 2.8s`，`delay = aRandom × 0.45`、`smoothstep(delay, delay + 0.55)`、三次方缓出；星系粒子按离中心的半径写 `aRandom`，核球先启航、外缘与伴星系后汇入。相机 `dist 9.37 → ~5.3` 走 `MathUtils.damp`（λ 1.6），途中穿插潮汐旋涡 `uTransitionSwirl`。中途被打断时 `bakeMorphSnapshot` 把 position / size / role / colorT / colorW 一并烘焙。
 - **UI 流**（`App.tsx` / `ControlDock.tsx`）：`mode = idle | body`。待机态只有极简标题「在群星之间写下此刻的心绪」+ 底部心情输入与 6 个灵感词胶囊；进入星体后左上「← 返回大星系」，底部为观测名 / 诗意解读 / 音阶提示 / 明信片。
-- **声景联动**（`NebulaAudioEngine.ts`）：待机态低通 320Hz 深空铺底；潜入后 2.5s 内 `setTargetAtTime(…, 0.6)` 开到 1400Hz 并渐入泛音。
+- **声景联动**（`NebulaAudioEngine.ts`）：待机态太阳风带通收窄到 300Hz、旋律总线压到 0.08；潜入后 τ=0.6 带通打开、旋律总线渐入到 1。
 
 ### 1. 六大情绪的专属几何拓扑
 
@@ -108,7 +108,7 @@ src/
 
 `NebulaAudioEngine.transition(2.0)` 与画面形变同长：粉红噪声经带通滤波做中心频率
 220 Hz → 2.6 kHz → 320 Hz 的上扫回落（星尘气流），叠加 48 → 96 → 42 Hz 的低频涌动，
-同时压低 Drone 层把中频让给过渡音、落定后按预设回位；形变结束时 `arrive()` 用调式内
+同时压低太阳风铺底把中频让给过渡音、落定后按预设回位；形变结束时 `arrive()` 用调式内
 三音给出「到位」的听觉锚点。
 
 ### 3. 分形态动态物理 `uBehavior`
@@ -161,13 +161,15 @@ src/
 
 ### 7. 程序化星际合成器
 
-`NebulaAudioEngine` 为单例，四层架构：
+`NebulaAudioEngine` 为单例，三层架构：
 
-1. **Ambient Drone**：3 个振荡器（sine ±6¢ / triangle）+ 低通 + 0.05 Hz LFO。
+1. **Solar Wind**：Paul Kellet 粉红噪声 Buffer + 带通滤波，作为深空铺底（非纯音，不会形成嗡声），随星云转速与旋律潮汐调整风声。
 2. **Generative Chimes**：按预设 BPM 的八分音符 lookahead 调度，马尔可夫音级游走（偏好小音程），
    立体声反馈延迟（0.375s / 0.52s，交叉反馈 + 低通阻尼）模拟宇宙混响。
-3. **Interactive Synth**：FM 钟琴音色，Attack 15ms / Release 1.8s。
-4. **Solar Wind**：Paul Kellet 粉红噪声 Buffer + 带通滤波，随星云转速调整风声。
+3. **Interactive Synth**：8 种程序化音色，见第 10 节。
+
+> 原有的 **Ambient Drone** 层（3 个持续正弦振荡器叠成的和声）已移除：任何持续的纯音在听感上都是嗡嗡声，
+> 分层静音实测该层占总输出 RMS 的 92%，调音高 / 降音量只能减轻，无法消除。
 
 > 浏览器自动播放合规：首屏 `IGNITE NEBULA` 按钮内执行 `audioContext.resume()`，
 > 主增益从 0.0001 用 2.4s 指数淡入，杜绝爆音。
@@ -209,10 +211,10 @@ src/
 
   每个情绪预设通过 `NebulaPreset.timbre` 绑定推荐音色；控制栏手动切换后 `timbreLocked` 置位，换星体不再回落。键盘拨弦 / 点击 / 悬停 / 落定确认音都走当前音色。
 - **音阶切换器**（`scales.ts`）：`SCALE_LIBRARY` 含大调五声、自然小调、多利亚、利底亚、弗里吉亚五种调式（音程数组，`buildScale` 按 MIDI→Hz 换算，`A3 = 220Hz` / `C4` 为基准）。`presetScale(preset, scaleId)`：`'preset'` 沿用星体自带调式，否则以星体主音为根套用调式库；顶栏与控制栏实时显示 `scaleDisplayName`。
-- **潮汐起伏自动旋律**：`tideAt(t) = (0.5 − 0.5·cos(2πt/14))^1.6`，14s 一个周期、低潮段被拉长。八分音符步进时按潮汐取密度：低潮约每 2.5s 一颗单音，高潮逼近每步一颗；`tide > 0.55` 概率叠加三度 / 四度双音，`tide > 0.8` 再垫一颗低八度 `synth_pad`；同时每拍把 Drone 增益 `setTargetAtTime(基线 × (1 + tide × 0.5), τ=0.4)` 推升（潜入过渡的 Drone 避让窗口内不介入）。待机大星系整体密度 ×0.22。
-- **Drone 铺底为什么不再「嗡」**：实测原实现（65/98/131Hz，三角波，待机增益 0.2）占总输出 RMS 的 92%，98Hz 三角波的三次谐波在 294Hz 形成尖峰，是一层恒定的次低频嗡声。现在根音抬一个八度（`presetDrone` 用 `root + 12`）、全部正弦、总线加 90Hz 高通、待机增益 0.09、潮汐推升上限 1.5 倍。
+- **潮汐起伏自动旋律**：`tideAt(t) = (0.5 − 0.5·cos(2πt/14))^1.6`，14s 一个周期、低潮段被拉长。八分音符步进时按潮汐取密度：低潮约每 2.5s 一颗单音，高潮逼近每步一颗；`tide > 0.55` 概率叠加三度 / 四度双音，`tide > 0.8` 再垫一颗低八度 `synth_pad`；同时每拍把太阳风增益 `setTargetAtTime(基线 × (1 + tide × 0.8), τ=0.4)` 推升（潜入过渡的避让窗口内不介入）。待机大星系整体密度 ×0.22。
+- **Drone 铺底已移除**：分层静音实测，原 Drone 层（持续正弦和声）占总输出 RMS 的 92%，是用户听到的「低沉嗡嗡声」来源；任何持续纯音都有这个问题，先尝试抬八度 / 改正弦 / 加高通均只能减轻，最终整层删除，铺底交给非纯音的太阳风噪声层。
 - **视觉「潮汐呼吸」四维同步**（`NebulaCanvas.tsx` / `nebulaShaders.ts`）：
-  - 慢包络 `uEnergy`：目标 = `tide × 0.7 + level × 0.7 + tide × level × 0.1`（`level` 为时域 RMS，已扣除 Drone 本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
+  - 慢包络 `uEnergy`：目标 = `tide × 0.7 + level × 0.7 + tide × level × 0.1`（`level` 为时域 RMS，已扣除铺底本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
   - ① 整体缩放与沉浮：`base *= 0.88 + uEnergy × 0.30`（高潮 +18%、低落 −12%），`base.y += (uEnergy − 0.5) × 0.25`。
   - ② 旋臂转速：`omega = uBehavior.x × (0.4 + uEnergy × 1.4 + uMid × 0.6) × 差速项`。
   - ③ 粒子与核心：`gl_PointSize × (0.85 + uEnergy × 0.30 + uTreble × 0.30 × role)`，核心 Sprite 随 `uBass` 脉冲并随 `uEnergy` 额外胀大。
