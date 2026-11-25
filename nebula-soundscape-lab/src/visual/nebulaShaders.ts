@@ -87,9 +87,14 @@ attribute float aSize;            // 粒子基础尺寸
 attribute float aSeed;            // 随机种子
 attribute float aRole;            // 结构角色权重 0~1
 attribute float aColorT;          // 颜色梯度参数 0~1
+attribute float aTargetSize;      // 目标尺寸
+attribute float aTargetRole;      // 目标角色权重
+attribute float aTargetColorT;    // 目标颜色梯度
+attribute float aRandom;          // 错峰飞行种子 0~1
 
 uniform float uTime;
 uniform float uMorphProgress;     // 0.0 → 1.0
+uniform float uTransitionSwirl;   // 潮汐旋涡强度（CPU 按形变进度驱动，两端归零）
 uniform vec4  uBehavior;          // x 自转 / y 径向脉冲 / z 垂直升腾 / w 湍流强度
 uniform float uShear;             // 开普勒差速强度
 
@@ -122,27 +127,34 @@ vec2 rot2(vec2 p, float a) {
 void main() {
   float t = uTime;
 
-  // ================= 1. 双缓冲形变 =================
+  // ================= 1. 双缓冲形变：错峰波浪 + 潮汐旋涡 =================
   float p = clamp(uMorphProgress, 0.0, 1.0);
-  // cubic ease-in-out
-  float e = p < 0.5 ? 4.0 * p * p * p : 1.0 - pow(-2.0 * p + 2.0, 3.0) / 2.0;
-  vec3 base = mix(position, aTargetPosition, e);
 
-  // 过渡中段：绕轴旋涡扭转，让粒子以星尘旋涡轨迹重组
-  float tw = sin(p * 3.14159265);
-  if (tw > 0.001) {
-    float r0 = length(base.xz);
-    float twAng = tw * (1.15 + aRole * 2.4);
-    base.xz = rot2(base.xz, twAng);
-    base.y += tw * 0.38 * sin(aSeed * 6.2831 + r0 * 1.8);
-    base *= 1.0 - tw * 0.14;
-  }
+  // 1.1 每颗粒子错峰延迟（0.0 ~ 0.35），三次方缓出，落地更柔和
+  float delay = aRandom * 0.35;
+  float localT = smoothstep(delay, delay + 0.65, p);
+  localT = 1.0 - pow(1.0 - localT, 3.0);
+
+  // 1.2 纯线性基础插值（便于中途打断时 CPU 精确烘焙）
+  vec3 base = mix(position, aTargetPosition, localT);
+
+  // 1.3 独立连续的潮汐旋涡与呼吸扩张（消除直线穿模的生硬感）
+  float swirlAngle = uTransitionSwirl * (1.35 - length(base) * 0.12);
+  float sw = sin(swirlAngle);
+  float cw = cos(swirlAngle);
+  base.xz = mat2(cw, -sw, sw, cw) * base.xz;
+  base *= (1.0 + abs(uTransitionSwirl) * 0.16);
+
+  // 1.4 尺寸 / 角色 / 颜色梯度与坐标同步插值，消除过渡结束时的跳变
+  float role = mix(aRole, aTargetRole, localT);
+  float colorT = mix(aColorT, aTargetColorT, localT);
+  float sizeT = mix(aSize, aTargetSize, localT);
 
   // ================= 2. 分形态动态物理 =================
   float r = length(base.xz);
 
   // 2.1 自转 + 开普勒差速（内快外慢）
-  float omega = uBehavior.x * (1.0 + uShear * aRole / (0.35 + r));
+  float omega = uBehavior.x * (1.0 + uShear * role / (0.35 + r));
   base.xz = rot2(base.xz, t * omega);
 
   // 2.2 径向脉冲（随低频能量呼吸）
@@ -162,7 +174,7 @@ void main() {
   vec3 np = base * 0.55 + vec3(aSeed * 13.0);
   float n1 = snoise(np + vec3(0.0, t * 0.12, 0.0));
   float n2 = snoise(np * 1.8 + vec3(7.3, -t * 0.15, 3.1));
-  base += vec3(n1, n2 * 0.7, n1 * 0.5) * uBehavior.w * (0.1 + 0.22 * aRole) * (0.6 + uMid * 1.3);
+  base += vec3(n1, n2 * 0.7, n1 * 0.5) * uBehavior.w * (0.1 + 0.22 * role) * (0.6 + uMid * 1.3);
 
   // ================= 3. 全局交互形变 =================
   // 坍缩
@@ -180,7 +192,7 @@ void main() {
   float infl = smoothstep(3.2, 0.0, pd) * uPointerStrength;
   vec3 pdir = toP / max(pd, 0.0001);
   vec3 tang = normalize(cross(vec3(0.0, 1.0, 0.0), pdir) + vec3(0.0001));
-  base += (pdir * 0.55 + tang * 0.95) * infl * (0.45 + 0.75 * aRole);
+  base += (pdir * 0.55 + tang * 0.95) * infl * (0.45 + 0.75 * role);
 
   // 键盘星簇光脉冲
   float bd = length(base - uBurstPos);
@@ -189,23 +201,23 @@ void main() {
   // ================= 4. 投影与尺寸 =================
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
 
-  float twinkle = 1.0 + uTreble * aRole * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
-  float sizePx = aSize * uSize * uPixelRatio * twinkle * (1.0 + uBass * 0.35 * aRole + burst * 1.8);
+  float twinkle = 1.0 + uTreble * role * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
+  float sizePx = sizeT * uSize * uPixelRatio * twinkle * (1.0 + uBass * 0.35 * role + burst * 1.8);
   gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
   gl_Position = projectionMatrix * mv;
 
   // ================= 5. 颜色 =================
-  vec3 col = aColorT < 0.5
-    ? mix(uColors[0], uColors[1], aColorT * 2.0)
-    : mix(uColors[1], uColors[2], (aColorT - 0.5) * 2.0);
+  vec3 col = colorT < 0.5
+    ? mix(uColors[0], uColors[1], colorT * 2.0)
+    : mix(uColors[1], uColors[2], (colorT - 0.5) * 2.0);
   vColor = col;
 
-  vGlow = (1.0 - aColorT) * 0.4
-        + aRole * 0.12
-        + uBass * 0.35 * (1.0 - aColorT)
+  vGlow = (1.0 - colorT) * 0.4
+        + role * 0.12
+        + uBass * 0.35 * (1.0 - colorT)
         + burst * 2.4
         + wave * 1.4;
-  vAlpha = (0.22 + 0.78 * (1.0 - aColorT * 0.55)) * fade;
+  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade;
 }
 `;
 

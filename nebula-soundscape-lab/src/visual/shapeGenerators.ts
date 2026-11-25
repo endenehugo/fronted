@@ -23,6 +23,8 @@ export interface ShapeAttributes {
   role: Float32Array;
   /** 颜色梯度参数 0~1（0 内核色 → 1 外晕色） */
   colorT: Float32Array;
+  /** 错峰飞行种子 0~1（形变时的延迟相位） */
+  random: Float32Array;
 }
 
 type Builder = (count: number) => ShapeAttributes;
@@ -34,6 +36,7 @@ function alloc(count: number): ShapeAttributes {
     seed: new Float32Array(count),
     role: new Float32Array(count),
     colorT: new Float32Array(count),
+    random: new Float32Array(count),
   };
 }
 
@@ -438,7 +441,10 @@ const BUILDERS: Record<PresetId, Builder> = {
 /** 生成指定预设的完整形状属性（坐标 + 尺寸 / 种子 / 角色 / 颜色梯度） */
 export function buildShape(type: PresetId, count: number): ShapeAttributes {
   const builder = BUILDERS[type] ?? BUILDERS.serenity;
-  return builder(Math.max(1, Math.floor(count)));
+  const s = builder(Math.max(1, Math.floor(count)));
+  // 错峰飞行种子：与 seed 解耦，形变延迟不受闪烁相位影响
+  for (let i = 0; i < s.random.length; i++) s.random[i] = Math.random();
+  return s;
 }
 
 /**

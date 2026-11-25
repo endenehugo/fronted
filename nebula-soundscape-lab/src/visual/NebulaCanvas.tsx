@@ -41,11 +41,16 @@ const KEY_DEGREES: Record<string, number> = {
   l: 8,
 };
 
-const MORPH_DURATION = 1.5;
+const MORPH_DURATION = 2.0;
 
-/** cubic ease-in-out */
-const cubicEase = (p: number): number =>
-  p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+/** 潮汐旋涡峰值强度（角度系数，中段最强、两端归零） */
+const SWIRL_AMP = 1.7;
+
+/** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
+const smoothstep01 = (e0: number, e1: number, x: number): number => {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
 
 /** 程序化径向高斯贴图，消除方形锯齿 */
 function createParticleTexture(size = 128): THREE.CanvasTexture {
@@ -125,6 +130,7 @@ class NebulaEngine {
   // 双缓冲形变
   private morphActive = false;
   private morphProgress = 0;
+  private transitionSwirl = 0;
 
   // 相机
   private camTheta = 0.4;
@@ -208,6 +214,7 @@ class NebulaEngine {
     this.uniforms = {
       uTime: { value: 0 },
       uMorphProgress: { value: 0 },
+      uTransitionSwirl: { value: 0 },
       uBehavior: { value: this.behaviorCurrent.clone() },
       uShear: { value: preset.shear },
       uBass: { value: 0 },
@@ -282,6 +289,7 @@ class NebulaEngine {
     geo.setAttribute('aTargetRole', new THREE.BufferAttribute(shape.role.slice(), 1));
     geo.setAttribute('aColorT', new THREE.BufferAttribute(shape.colorT.slice(), 1));
     geo.setAttribute('aTargetColorT', new THREE.BufferAttribute(shape.colorT.slice(), 1));
+    geo.setAttribute('aRandom', new THREE.BufferAttribute(shape.random.slice(), 1));
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 60);
     return geo;
   }
@@ -294,7 +302,9 @@ class NebulaEngine {
     this.points.geometry = geo;
     this.morphActive = false;
     this.morphProgress = 0;
+    this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
+    this.uniforms.uTransitionSwirl.value = 0;
   }
 
   // -------------------------------------------------------------- 形变
@@ -302,38 +312,89 @@ class NebulaEngine {
   /** 把当前插值状态快照进 position，再写入新目标，避免中途切换时跳变 */
   private beginMorph(next: ShapeAttributes): void {
     const geo = this.points.geometry;
-    const pairs: [string, string][] = [
-      ['position', 'aTargetPosition'],
-      ['aSize', 'aTargetSize'],
-      ['aRole', 'aTargetRole'],
-      ['aColorT', 'aTargetColorT'],
-    ];
 
-    if (this.morphActive) {
-      const e = cubicEase(this.morphProgress);
-      for (const [curName, tgtName] of pairs) {
-        const cur = geo.getAttribute(curName) as THREE.BufferAttribute;
-        const tgt = geo.getAttribute(tgtName) as THREE.BufferAttribute;
-        const a = cur.array as Float32Array;
-        const b = tgt.array as Float32Array;
-        for (let i = 0; i < a.length; i++) a[i] = a[i] + (b[i] - a[i]) * e;
-        cur.needsUpdate = true;
-      }
-    }
+    if (this.morphActive) this.bakeMorphSnapshot();
 
-    const write = (name: string, data: Float32Array, itemSize: number) => {
+    const write = (name: string, data: Float32Array) => {
       const attr = geo.getAttribute(name) as THREE.BufferAttribute;
       (attr.array as Float32Array).set(data);
       attr.needsUpdate = true;
     };
-    write('aTargetPosition', next.position, 3);
-    write('aTargetSize', next.size, 1);
-    write('aTargetRole', next.role, 1);
-    write('aTargetColorT', next.colorT, 1);
+    write('aTargetPosition', next.position);
+    write('aTargetSize', next.size);
+    write('aTargetRole', next.role);
+    write('aTargetColorT', next.colorT);
 
     this.morphProgress = 0;
     this.morphActive = true;
+    this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
+    this.uniforms.uTransitionSwirl.value = 0;
+
+    // 声画同步：过渡音效与画面形变同长
+    this.audio.transition(MORPH_DURATION);
+  }
+
+  /**
+   * 中途打断时，把着色器里「错峰插值 + 潮汐旋涡」的结果精确烘焙回当前缓冲。
+   * 必须逐粒子复现 localT（延迟 + smoothstep + 三次缓出），否则打断瞬间会跳变。
+   */
+  private bakeMorphSnapshot(): void {
+    const geo = this.points.geometry;
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    const tpos = geo.getAttribute('aTargetPosition') as THREE.BufferAttribute;
+    const rnd = (geo.getAttribute('aRandom') as THREE.BufferAttribute).array as Float32Array;
+    const a = pos.array as Float32Array;
+    const b = tpos.array as Float32Array;
+
+    const p = this.morphProgress;
+    const swirl = this.transitionSwirl;
+    const expand = 1 + Math.abs(swirl) * 0.16;
+    const n = rnd.length;
+
+    for (let i = 0; i < n; i++) {
+      const delay = rnd[i] * 0.35;
+      let lt = smoothstep01(delay, delay + 0.65, p);
+      lt = 1 - Math.pow(1 - lt, 3);
+
+      const i3 = i * 3;
+      let x = a[i3] + (b[i3] - a[i3]) * lt;
+      let y = a[i3 + 1] + (b[i3 + 1] - a[i3 + 1]) * lt;
+      let z = a[i3 + 2] + (b[i3 + 2] - a[i3 + 2]) * lt;
+
+      if (swirl !== 0) {
+        const ang = swirl * (1.35 - Math.hypot(x, y, z) * 0.12);
+        const c = Math.cos(ang);
+        const s = Math.sin(ang);
+        const nx = c * x + s * z;
+        const nz = -s * x + c * z;
+        x = nx * expand;
+        y *= expand;
+        z = nz * expand;
+      }
+
+      a[i3] = x;
+      a[i3 + 1] = y;
+      a[i3 + 2] = z;
+    }
+    pos.needsUpdate = true;
+
+    const bakeScalar = (curName: string, tgtName: string): void => {
+      const cur = geo.getAttribute(curName) as THREE.BufferAttribute;
+      const tgt = geo.getAttribute(tgtName) as THREE.BufferAttribute;
+      const ca = cur.array as Float32Array;
+      const ta = tgt.array as Float32Array;
+      for (let i = 0; i < n; i++) {
+        const delay = rnd[i] * 0.35;
+        let lt = smoothstep01(delay, delay + 0.65, p);
+        lt = 1 - Math.pow(1 - lt, 3);
+        ca[i] = ca[i] + (ta[i] - ca[i]) * lt;
+      }
+      cur.needsUpdate = true;
+    };
+    bakeScalar('aSize', 'aTargetSize');
+    bakeScalar('aRole', 'aTargetRole');
+    bakeScalar('aColorT', 'aTargetColorT');
   }
 
   /** 过渡结束：把目标缓冲同步回当前缓冲 */
@@ -353,7 +414,11 @@ class NebulaEngine {
     }
     this.morphActive = false;
     this.morphProgress = 0;
+    this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
+    this.uniforms.uTransitionSwirl.value = 0;
+    // 声画同步：形变落定时给一记轻柔和弦确认音
+    this.audio.arrive();
   }
 
   // -------------------------------------------------------------- 预设
@@ -647,11 +712,16 @@ class NebulaEngine {
     this.shearCurrent += (this.shearTarget - this.shearCurrent) * (1 - Math.exp(-dt * 2.4));
     this.uniforms.uShear.value = this.shearCurrent;
 
-    // 双缓冲形变推进
+    // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
     if (this.morphActive) {
       this.morphProgress = Math.min(1, this.morphProgress + dt / MORPH_DURATION);
+      this.transitionSwirl = SWIRL_AMP * Math.sin(Math.PI * this.morphProgress);
       this.uniforms.uMorphProgress.value = this.morphProgress;
+      this.uniforms.uTransitionSwirl.value = this.transitionSwirl;
       if (this.morphProgress >= 1) this.finalizeMorph();
+    } else if (this.transitionSwirl !== 0) {
+      this.transitionSwirl = 0;
+      this.uniforms.uTransitionSwirl.value = 0;
     }
 
     // 指针

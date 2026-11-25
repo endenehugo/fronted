@@ -80,15 +80,26 @@ src/
 每个 builder 同时输出 `size / seed / role / colorT` 四个逐粒子属性：
 `role` 是结构角色权重（驱动形变旋涡强度与差速自转），`colorT` 是 0 内核 → 1 外晕的颜色梯度参数。
 
-### 2. 双缓冲形变（GPU Morph）
+### 2. 双缓冲形变（GPU Morph · 错峰波浪 + 潮汐旋涡）
 
 - `BufferGeometry` 同时挂 `position`（当前）与 `aTargetPosition`（目标），并配 `aSize/aTargetSize`、
-  `aRole/aTargetRole`、`aColorT/aTargetColorT` 四对缓冲。
-- 切换预设时把新形态写入目标缓冲，`uMorphProgress` 在 **1.5s** 内 0 → 1；顶点着色器按 cubic ease-in-out 插值，
-  并在过渡中段叠加 `sin(p·π)` 的绕 Y 轴旋涡扭转（角度 `tw·(1.15 + role·2.4)`，另加 y 向抖动与 14% 收缩），
-  粒子以星尘旋涡轨迹重组。
-- 过渡结束 `finalizeMorph()` 把目标缓冲整体拷回当前缓冲并把 `uMorphProgress` 归零，稳态零插值开销。
-- 同一预设只改情绪时不重建几何（`shapeChanged = preset.id !== shapeId`），避免无谓形变。
+  `aRole/aTargetRole`、`aColorT/aTargetColorT`、`aRandom`（错峰种子）等缓冲。
+- **错峰波浪**：每颗粒子按 `aRandom` 获得独立延迟（0–0.35），`localT = smoothstep(delay, delay + 0.65, p)`
+  再做三次方缓出，粒子分批起飞、分批落地，消除「整片同时平移」的塑料感。
+- **潮汐旋涡**：形变期间 CPU 驱动 `uTransitionSwirl = A·sin(π·p)`（中段最强、两端归零），
+  顶点着色器按 `swirl·(1.35 - |base|·0.12)` 做差速旋转（内圈转得比外圈多），并叠加
+  `1 + |swirl|·0.16` 的呼吸扩张，粒子沿星尘旋涡轨迹重组而非直线穿模。
+- 形变总时长 **2.0s**；坐标 / 尺寸 / 角色 / 颜色梯度共用同一个 `localT`，过渡结束不产生任何跳变。
+- **中途打断可精确烘焙**：`bakeMorphSnapshot()` 用同一套 `smoothstep + 三次缓出 + 旋涡变换` 在 CPU
+  复现着色器结果写回当前缓冲，连续切换预设也不会闪跳。
+- 同一预设只改情绪时不重建几何（`shapeChanged = preset.id !== shapeId`）。
+
+### 2.1 声画同步过渡
+
+`NebulaAudioEngine.transition(2.0)` 与画面形变同长：粉红噪声经带通滤波做中心频率
+220 Hz → 2.6 kHz → 320 Hz 的上扫回落（星尘气流），叠加 48 → 96 → 42 Hz 的低频涌动，
+同时压低 Drone 层把中频让给过渡音、落定后按预设回位；形变结束时 `arrive()` 用调式内
+三音给出「到位」的听觉锚点。
 
 ### 3. 分形态动态物理 `uBehavior`
 
@@ -188,8 +199,10 @@ src/
 ### 改造 · 六大专属拓扑与双缓冲形变
 - [x] `generateNebulaShape(type, count)` 导出 6 套截然不同的天体几何（蝴蝶 / 超新星 / 黑洞 / 脉冲星 / 红巨星 / 创生之柱），
       跨度统一归一化在半径 ~3.5 内（实测包围盒见下）
-- [x] `aTargetPosition` + `uMorphProgress` 双缓冲形变，1.5s cubic ease-in-out + 中段 `sin(p·π)` 旋涡扭转，
-      结束后目标缓冲同步回 `position`
+- [x] `aTargetPosition` + `uMorphProgress` 双缓冲形变，2.0s 错峰波浪（`aRandom` 延迟 0–0.35 + 三次缓出）
+      + `uTransitionSwirl` 潮汐旋涡（差速旋转 + 呼吸扩张），结束后目标缓冲同步回 `position`
+- [x] 形变期间坐标 / 尺寸 / 角色 / 颜色同 `localT` 插值，落点无跳变；中途打断用 `bakeMorphSnapshot()` 精确烘焙
+- [x] 声画同步：`transition(2.0)` 噪声气流 + 低频涌动与画面同长，落定 `arrive()` 和弦确认音
 - [x] `uBehavior` 四类分形态物理（melancholy 强开普勒差速、healing 持续升腾飘散等）
 - [x] 切换预设时相机平滑移动到形态最佳俯仰角；用户拖拽 / 滚轮立即让权（实测 `userCam: true` 后不再跟随）
 - [x] 零回退：FFT 频谱、悬停旋涡、长按坍缩 / 超新星、键盘星簇、明信片导出全部保留并实测通过

@@ -467,6 +467,73 @@ export class NebulaAudioEngine {
     this.riser = null;
   }
 
+  // ---------------------------------------------------------------- 过渡音效
+
+  /**
+   * 形变过渡音效：与画面 2s 形变同步的「星尘气流 + 低频涌动」。
+   * 噪声带通中心频率先上扫再回落，低频从 48Hz 涌到 96Hz 再沉回 42Hz，
+   * 同时让 Drone 层轻微避让，把中频让给过渡音。
+   */
+  transition(duration = 2): void {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const d = Math.max(0.4, duration);
+
+    // 噪声气流（星尘被卷起的摩擦感）
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.makePinkNoise(d + 0.6);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.1;
+    bp.frequency.setValueAtTime(220, t);
+    bp.frequency.exponentialRampToValueAtTime(2600, t + d * 0.62);
+    bp.frequency.exponentialRampToValueAtTime(320, t + d);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.exponentialRampToValueAtTime(0.11, t + d * 0.35);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    noise.connect(bp);
+    bp.connect(ng);
+    ng.connect(this.master);
+    noise.start(t);
+    noise.stop(t + d + 0.1);
+
+    // 低频涌动（质量在移动）
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(48, t);
+    sub.frequency.exponentialRampToValueAtTime(96, t + d * 0.5);
+    sub.frequency.exponentialRampToValueAtTime(42, t + d);
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.0001, t);
+    sg.gain.exponentialRampToValueAtTime(0.12, t + d * 0.4);
+    sg.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    sub.connect(sg);
+    sg.connect(this.master);
+    sub.start(t);
+    sub.stop(t + d + 0.1);
+
+    // Drone 避让：过渡期间压低，落定后按当前预设回位
+    if (this.drone) {
+      const back = 0.13 + (this.preset?.turbulence ?? 0) * 0.05;
+      this.drone.gain.gain.cancelScheduledValues(t);
+      this.drone.gain.gain.setTargetAtTime(0.065, t, 0.16);
+      this.drone.gain.gain.setTargetAtTime(back, t + d * 0.78, 0.5);
+    }
+  }
+
+  /** 形变落定：调式内三音轻声确认，给画面一个「到位」的听觉锚点 */
+  arrive(): void {
+    if (!this.ctx || this.scale.length === 0) return;
+    const t = this.ctx.currentTime;
+    const n = this.scale.length;
+    [0, 2, 4].forEach((deg, i) => {
+      const freq = this.scale[(deg + n) % n];
+      this.bell(freq, 0.05, t + i * 0.07, (i - 1) * 0.5, 2.8);
+    });
+  }
+
   /** 超新星爆发：低频冲击 + 噪声气浪 + 调式和弦琶音 */
   supernova(power = 1): void {
     if (!this.ctx) return;
