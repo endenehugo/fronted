@@ -330,8 +330,8 @@ void main() {
   gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
   gl_Position = projectionMatrix * mv;
 
-  // 透明度：基础低透明，bass 托起；越靠外越淡
-  vAlpha = 0.10 + uBass * 0.10;
+  // 透明度：基础低透明，bass 轻微托起；越靠外越淡
+  vAlpha = 0.045 + uBass * 0.05;
 }
 `;
 

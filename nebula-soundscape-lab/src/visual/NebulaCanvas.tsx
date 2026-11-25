@@ -407,12 +407,13 @@ class NebulaEngine {
    * 数量远少于主粒子，尺寸大、透明度低，颜色取内核色的柔化版；随 bass 胀缩与变亮。
    */
   private buildFog(): void {
-    const n = isMobileDevice() ? 120 : 220;
+    const n = isMobileDevice() ? 80 : 150;
     const pos = new Float32Array(n * 3);
     const size = new Float32Array(n);
     const seed = new Float32Array(n);
-    const rMin = 1.4;
-    const rMax = 4.2;
+    // 雾片外移到粒子群外围，避免贴在内层把核心裹住
+    const rMin = 2.6;
+    const rMax = 4.6;
     for (let i = 0; i < n; i++) {
       const u = Math.random() * 2 - 1;
       const ph = Math.random() * Math.PI * 2;
@@ -421,7 +422,7 @@ class NebulaEngine {
       pos[i * 3] = r * st * Math.cos(ph);
       pos[i * 3 + 1] = r * u * 0.8;
       pos[i * 3 + 2] = r * st * Math.sin(ph);
-      size[i] = 6 + Math.random() * 9;
+      size[i] = 3.5 + Math.random() * 5;
       seed[i] = Math.random();
     }
     const geo = new THREE.BufferGeometry();
@@ -1021,12 +1022,12 @@ class NebulaEngine {
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
     this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6) * (0.3 + coreK * 0.8));
-    coreMat.opacity = (0.05 + bands.bass * 0.15) * coreK;
+    coreMat.opacity = (0.04 + bands.bass * 0.11) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
     // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光
-    const lift = this.grooveBass * 0.55 + this.grooveMid * 0.3;
-    this.bloom.strength = this.bloomCurrent * 0.92 + lift + this.bloomKick;
+    const lift = this.grooveBass * 0.4 + this.grooveMid * 0.22;
+    this.bloom.strength = this.bloomCurrent * 0.78 + lift + this.bloomKick;
 
     // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
     this.vignette.uniforms.uAmount.value = 0.36 + this.grooveBass * 0.12;
