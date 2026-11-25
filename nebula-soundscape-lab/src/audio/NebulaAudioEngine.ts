@@ -30,12 +30,6 @@ const TIMBRE_GAIN: Record<TimbreId, number> = {
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
-interface WindLayer {
-  src: AudioBufferSourceNode;
-  filter: BiquadFilterNode;
-  gain: GainNode;
-}
-
 interface Riser {
   osc: OscillatorNode;
   gain: GainNode;
@@ -44,13 +38,12 @@ interface Riser {
 /**
  * NebulaAudioEngine —— 程序化星际合成器（单例）
  *
- * 三层声音架构：
- *  1. Solar Wind      深空环境铺底（粉红噪声 + 带通滤波，非纯音，随潮汐起伏）
- *  2. Generative Chimes 自动星辰旋律（马尔可夫音级游走 + 14s 潮汐密度曲线 + 立体声延迟）
- *  3. Interactive Synth 交互即时响应（8 种纯程序化音色，见 playNote）
+ * 两层声音架构（没有任何持续铺底层）：
+ *  1. Generative Chimes 自动星辰旋律（马尔可夫音级游走 + 14s 潮汐密度曲线 + 立体声延迟）
+ *  2. Interactive Synth 交互即时响应（8 种纯程序化音色，见 playNote）
  *
- * 注意：曾有第四层「Ambient Drone」（三个持续正弦波叠成的和声）。
- * 任何持续的纯音在听感上都是嗡嗡声，调音高 / 降音量只能减轻，已整层移除。
+ * 注意：曾有「Ambient Drone」（三个持续正弦波叠成的和声）与「Solar Wind」（粉红噪声铺底）两层，
+ * 用户分层静音试听后要求全部移除：持续纯音在听感上就是嗡嗡声，噪声铺底也被要求删掉。
  *
  * 所有声音均由 Web Audio API 实时合成，零外部音频资源。
  * 所有增益包络都从 0.0001 指数爬坡、再指数回落到 0.0001，杜绝爆音。
@@ -74,7 +67,6 @@ export class NebulaAudioEngine {
   private fbL!: GainNode;
   private fbR!: GainNode;
 
-  private wind: WindLayer | null = null;
   private riser: Riser | null = null;
   /** 生成旋律总线：待机态压低、进入星体后随低通一起渐入（键盘 / 点击等交互音不走此总线） */
   private melody: GainNode | null = null;
@@ -88,8 +80,6 @@ export class NebulaAudioEngine {
   private timbreLocked = false;
   /** 进行中的发声数（用于 MAX_VOICES 限流） */
   private voices = 0;
-  /** 潜入过渡期间太阳风让位给过渡音，此时间戳之前不做潮汐推升 */
-  private windHoldUntil = 0;
   private volume = 0.75;
   private schedulerId: number | null = null;
   private nextNoteTime = 0;
@@ -157,7 +147,6 @@ export class NebulaAudioEngine {
 
     this.buildReverb();
     this.buildMelodyBus();
-    this.buildWind();
     this.setPreset(preset);
     this.startScheduler();
 
@@ -225,29 +214,6 @@ export class NebulaAudioEngine {
     this.melody = g;
   }
 
-  /** Solar Wind：内存生成粉红噪波 + 带通滤波 */
-  private buildWind(): void {
-    const ctx = this.ctx!;
-    const src = ctx.createBufferSource();
-    src.buffer = this.makePinkNoise(4);
-    src.loop = true;
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 620;
-    filter.Q.value = 0.55;
-
-    const gain = ctx.createGain();
-    gain.gain.value = 0.03;
-
-    src.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.master);
-    src.start();
-
-    this.wind = { src, filter, gain };
-  }
-
   /** Paul Kellet 粉红噪声 */
   private makePinkNoise(seconds = 4): AudioBuffer {
     const ctx = this.ctx!;
@@ -287,16 +253,10 @@ export class NebulaAudioEngine {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
 
-    // 预设切换的全部持续参数都走 setTargetAtTime（指数滑音，起点取当前值，无爆音）。
-    // 待机大星系：太阳风压低、带通收窄、生成旋律近乎静默 → 稀疏的深空铺底；
-    // 进入情绪星体：带通 τ=0.6 缓缓打开（≈2.5s 完成 98%），旋律总线同步渐入。
+    // 预设切换的持续参数走 setTargetAtTime（指数滑音，起点取当前值，无爆音）。
+    // 待机大星系：生成旋律近乎静默；进入情绪星体：旋律总线 τ=0.6 渐入。
     const idle = preset.id === 'galaxy_idle';
     const tau = 0.6;
-    if (this.wind) {
-      this.wind.gain.gain.setTargetAtTime(this.windGainTarget(preset), t, tau);
-      this.wind.filter.frequency.setTargetAtTime(idle ? 300 : 380 + preset.speed * 620, t, tau);
-    }
-
     this.melody?.gain.setTargetAtTime(idle ? 0.08 : 1, t, tau);
   }
 
@@ -324,11 +284,6 @@ export class NebulaAudioEngine {
     return this.ctx ? this.tideAt(this.ctx.currentTime) : 0;
   }
 
-  /** 太阳风增益目标：铺底只做背景，不盖过旋律 */
-  private windGainTarget(preset: NebulaPreset): number {
-    return preset.id === 'galaxy_idle' ? 0.022 : 0.026 + preset.turbulence * 0.03;
-  }
-
   setVolume(v: number): void {
     this.volume = Math.min(1, Math.max(0, v));
     if (!this.ctx) return;
@@ -351,8 +306,6 @@ export class NebulaAudioEngine {
       const now = this.ctx.currentTime;
       const bpm = this.preset.bpm;
       const step = 60 / bpm / 2; // 八分音符
-      // 潮汐推升：高潮时太阳风铺底音量随之上涨（τ=0.4 平滑，潜入过渡期间让位）
-      this.pushWind(this.tideAt(now), now);
       while (this.nextNoteTime < now + 0.35) {
         this.scheduleStep(this.nextNoteTime, step);
         this.nextNoteTime += step;
@@ -372,13 +325,6 @@ export class NebulaAudioEngine {
     const density = lerp(lowDensity, 0.85, tide) * idleK;
     if (Math.random() >= density) return;
     this.scheduleChime(time, tide);
-  }
-
-  /** 太阳风潮汐推升：高潮最多抬到基线的 1.8 倍，低潮回到基线 */
-  private pushWind(tide: number, now: number): void {
-    if (!this.wind || !this.preset || now < this.windHoldUntil) return;
-    const target = this.windGainTarget(this.preset) * (1 + tide * 0.8);
-    this.wind.gain.gain.setTargetAtTime(target, now, 0.4);
   }
 
   /**
@@ -718,8 +664,7 @@ export class NebulaAudioEngine {
 
   /**
    * 形变过渡音效：与画面 2.8s「星际潜入」同步的「星尘气流 + 低频涌动」。
-   * 噪声带通中心频率先上扫再回落，低频从 48Hz 涌到 96Hz 再沉回 42Hz，
-   * 同时让太阳风铺底轻微避让，把中频让给过渡音。
+   * 噪声带通中心频率先上扫再回落，低频从 48Hz 涌到 96Hz 再沉回 42Hz。
    */
   transition(duration = 2.8): void {
     if (!this.ctx) return;
@@ -760,15 +705,6 @@ export class NebulaAudioEngine {
     sg.connect(this.master);
     sub.start(t);
     sub.stop(t + d + 0.1);
-
-    // 太阳风避让：过渡期间压低，落定后按当前预设回位；避让窗口内潮汐推升不介入
-    if (this.wind) {
-      const back = this.preset ? this.windGainTarget(this.preset) : 0.02;
-      this.wind.gain.gain.cancelScheduledValues(t);
-      this.wind.gain.gain.setTargetAtTime(0.006, t, 0.16);
-      this.wind.gain.gain.setTargetAtTime(back, t + d * 0.78, 0.5);
-      this.windHoldUntil = t + d * 0.78;
-    }
   }
 
   /** 形变落定：调式内三音轻声确认，给画面一个「到位」的听觉锚点 */
