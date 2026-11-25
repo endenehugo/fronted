@@ -16,6 +16,9 @@ interface Props {
   onChange: (v: string) => void;
   onSubmit: () => void;
   onClear: () => void;
+  /** 效价滑块 -1~1；null 表示跟随文本解析 */
+  valence: number | null;
+  onValence: (v: number) => void;
   volume: number;
   muted: boolean;
   onVolume: (v: number) => void;
@@ -63,9 +66,10 @@ function Chip({
 /** 底部悬浮玻璃拟态控制栏 */
 export default function ControlDock(props: Props) {
   const { mode, preset, inspirations, presets, activeId, onSelect, onInspire } = props;
-  const { value, onChange, onSubmit, onClear } = props;
+  const { value, onChange, onSubmit, onClear, valence, onValence } = props;
   const { volume, muted, onVolume, onToggleMute, onCapture, onShare, busy } = props;
   const idle = mode === 'idle';
+  const valenceValue = valence ?? 0;
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -169,6 +173,24 @@ export default function ControlDock(props: Props) {
               </button>
             )}
           </div>
+        </div>
+
+        {/* 效价滑块：低落 ↔ 明亮，连续改变星云形态与配色 */}
+        <div className="mt-2 flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
+          <span className="shrink-0 text-[11px] text-white/45">低落</span>
+          <input
+            type="range"
+            min={-100}
+            max={100}
+            value={Math.round(valenceValue * 100)}
+            onChange={(e) => onValence(Number(e.target.value) / 100)}
+            className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-white/20"
+            aria-label="情绪效价滑块：低落至明亮"
+          />
+          <span className="shrink-0 text-[11px] text-white/45">明亮</span>
+          <span className="hidden w-10 shrink-0 text-right font-mono text-[10px] text-white/35 sm:inline">
+            {valence === null ? '跟随' : `${valenceValue > 0 ? '+' : ''}${valenceValue.toFixed(1)}`}
+          </span>
         </div>
 
         {/* 心情输入 */}

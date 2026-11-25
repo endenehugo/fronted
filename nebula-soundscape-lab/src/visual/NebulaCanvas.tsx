@@ -13,6 +13,7 @@ import {
   starfieldVertexShader,
 } from './nebulaShaders';
 import { buildShape, type ShapeAttributes } from './shapeGenerators';
+import { PRESET_MAP } from './presets';
 import type { EmotionVector, NebulaPreset, PresetId } from '../types';
 import { NebulaAudioEngine } from '../audio/NebulaAudioEngine';
 
@@ -34,6 +35,8 @@ interface Props {
   palette: [string, string, string] | null;
   turbulence: number;
   speed: number;
+  /** 效价滑块 -1~1；null 表示未启用，跟随文本解析 */
+  valence: number | null;
   onStats?: (s: NebulaStats) => void;
 }
 
@@ -143,6 +146,10 @@ class NebulaEngine {
   private sizeCurrent = 1;
   private coreTarget = 0.4;
   private coreCurrent = 0.4;
+  /** 频段律动叠加：bass 体量涨缩 / mid 转速辉光 / treble 粒子尺寸，均在 loop 内平滑 */
+  private grooveBass = 0;
+  private grooveMid = 0;
+  private grooveTreble = 0;
 
   // 分形态动态物理
   private behaviorTarget = new THREE.Vector4(0.2, 0.1, 0, 0.1);
@@ -156,6 +163,11 @@ class NebulaEngine {
   private morphActive = false;
   private morphProgress = 0;
   private transitionSwirl = 0;
+
+  // 效价滑块连续形变：两端锚点形态缓存 + 当前插值比例（null = 未启用，跟随预设）
+  private valenceMix: number | null = null;
+  private shapeLow: ShapeAttributes | null = null;
+  private shapeHigh: ShapeAttributes | null = null;
 
   // 相机
   private camTheta = 0.4;
@@ -549,7 +561,9 @@ class NebulaEngine {
       this.bloomCurrent = this.bloomTarget;
       this.sizeCurrent = this.sizeTarget;
       this.coreCurrent = this.coreTarget;
-      this.uniforms.uSize.value = this.sizeCurrent;
+      // 粒子尺寸：基线 × treble 细节脉动（高频点亮星点），整体体量再随 bass 涨缩
+    const sizeGroove = this.sizeCurrent * (1 + this.grooveTreble * 0.22) * (1 + this.grooveBass * 0.12);
+    this.uniforms.uSize.value = sizeGroove;
       this.behaviorCurrent.copy(this.behaviorTarget);
       this.shearCurrent = this.shearTarget;
       this.camTheta = this.camThetaTarget;
@@ -582,6 +596,68 @@ class NebulaEngine {
     if (colors.length === 3) {
       this.targetColors = colors;
     }
+  }
+
+  /**
+   * 效价滑块连续形变：mix ∈ [-1,1]，-1 锚定深思/低落形态，1 锚定狂喜/明亮形态。
+   * 启用后在两端缓存形态间逐帧插值几何与配色；传 null 关闭，回到当前预设形态。
+   */
+  setValenceMix(mix: number | null): void {
+    if (mix === null) {
+      this.valenceMix = null;
+      // 关闭滑块：回到当前预设形态（走标准 morph）
+      this.beginMorph(buildShape(this.shapeId, this.count));
+      return;
+    }
+    if (!this.shapeLow || !this.shapeHigh) {
+      this.shapeLow = buildShape(PRESET_MAP.melancholy.id, this.count);
+      this.shapeHigh = buildShape(PRESET_MAP.euphoria.id, this.count);
+    }
+    this.valenceMix = Math.min(1, Math.max(-1, mix));
+    this.applyValenceGeometry();
+  }
+
+  /** 按当前 valenceMix 把两端几何插值写入 position / aTargetPosition 等缓冲 */
+  private applyValenceGeometry(): void {
+    if (this.valenceMix === null || !this.shapeLow || !this.shapeHigh) return;
+    const t = (this.valenceMix + 1) / 2; // 0 低落端 → 1 明亮端
+    const geo = this.points.geometry;
+    const low = this.shapeLow;
+    const high = this.shapeHigh;
+    const n = this.count;
+
+    const lerpAttr = (name: string, lo: Float32Array, hi: Float32Array, scalar: boolean) => {
+      const attr = geo.getAttribute(name) as THREE.BufferAttribute;
+      const arr = attr.array as Float32Array;
+      const stride = scalar ? 1 : 3;
+      for (let i = 0; i < n; i++) {
+        const li = scalar ? i : i * 3;
+        arr[li] = lo[li] + (hi[li] - lo[li]) * t;
+        if (!scalar) {
+          arr[li + 1] = lo[li + 1] + (hi[li + 1] - lo[li + 1]) * t;
+          arr[li + 2] = lo[li + 2] + (hi[li + 2] - lo[li + 2]) * t;
+        }
+      }
+      attr.needsUpdate = true;
+    };
+
+    lerpAttr('position', low.position, high.position, false);
+    lerpAttr('aTargetPosition', low.position, high.position, false);
+    lerpAttr('aSize', low.size, high.size, true);
+    lerpAttr('aTargetSize', low.size, high.size, true);
+    lerpAttr('aRole', low.role, high.role, true);
+    lerpAttr('aTargetRole', low.role, high.role, true);
+    lerpAttr('aColorT', low.colorT, high.colorT, true);
+    lerpAttr('aTargetColorT', low.colorT, high.colorT, true);
+
+    // 配色在两端预设调色板间渐变
+    const lowC = PRESET_MAP.melancholy.colors;
+    const highC = PRESET_MAP.euphoria.colors;
+    this.targetColors = lowC.map((hex, i) => {
+      const c0 = new THREE.Color(hex);
+      const c1 = new THREE.Color(highC[i]);
+      return c0.lerp(c1, t);
+    });
   }
 
   /** 覆盖湍流 / 旋转速度目标值（心情解析结果，相对预设缩放） */
@@ -801,16 +877,22 @@ class NebulaEngine {
     this.bloomCurrent = THREE.MathUtils.damp(this.bloomCurrent, this.bloomTarget, 3.0, dt);
     this.bloomKick *= Math.exp(-dt * 1.8);
     this.sizeCurrent = THREE.MathUtils.damp(this.sizeCurrent, this.sizeTarget, 3.0, dt);
-    this.uniforms.uSize.value = this.sizeCurrent;
     this.coreCurrent = THREE.MathUtils.damp(this.coreCurrent, this.coreTarget, 3.0, dt);
+
+    // 频段律动平滑跟随：bass 体量 / mid 转速辉光 / treble 粒子细节
+    const grooveK = 1 - Math.exp(-dt * 6.0);
+    this.grooveBass += (bands.bass - this.grooveBass) * grooveK;
+    this.grooveMid += (bands.mid - this.grooveMid) * grooveK;
+    this.grooveTreble += (bands.treble - this.grooveTreble) * grooveK;
 
     this.uniformColors.forEach((c, idx) => {
       c.lerp(this.targetColors[idx] ?? c, 1 - Math.exp(-3.2 * dt));
     });
 
-    // 分形态动态物理
+    // 分形态动态物理（mid 叠加转速与辉光：中段能量推动旋臂，低落时趋于沉静）
     this.behaviorCurrent.lerp(this.behaviorTarget, 1 - Math.exp(-3.0 * dt));
     this.uniforms.uBehavior.value.copy(this.behaviorCurrent);
+    this.uniforms.uBehavior.value.x *= 1 + this.grooveMid * 0.35;
     this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
@@ -875,9 +957,11 @@ class NebulaEngine {
     );
     this.camera.lookAt(0, 0, 0);
 
-    // 背景星野：缓慢微旋 + 错相位闪烁
+    // 背景星野：缓慢微旋 + 错相位闪烁；整体明度随 bass 呼吸，低落时压暗
     this.starfield.rotation.y += dt * 0.004;
     this.starMaterial.uniforms.uTime.value = t;
+    const starDim = 0.62 + this.grooveBass * 0.38;
+    (this.starfield.material as THREE.ShaderMaterial).opacity = starDim;
 
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
@@ -886,8 +970,14 @@ class NebulaEngine {
     coreMat.opacity = (0.08 + bands.bass * 0.12) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
-    // Bloom 随低频脉动
-    this.bloom.strength = this.bloomCurrent * 0.92 + bands.bass * 0.95 + this.bloomKick;
+    // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光
+    const lift = this.grooveBass * 0.55 + this.grooveMid * 0.3;
+    this.bloom.strength = this.bloomCurrent * 0.92 + lift + this.bloomKick;
+
+    // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢（沿相机距离方向缩放粒子群）
+    const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.04;
+    this.points.scale.setScalar(bodyScale);
+    this.coreSprite.scale.multiplyScalar(bodyScale);
 
     // 帧率监控：低帧率自动降级
     this.warmup += dt;
@@ -973,7 +1063,7 @@ class NebulaEngine {
 }
 
 export const NebulaCanvas = forwardRef<NebulaCanvasHandle, Props>(function NebulaCanvas(
-  { preset, emotion, palette, turbulence, speed, onStats },
+  { preset, emotion, palette, turbulence, speed, valence, onStats },
   ref,
 ) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -992,6 +1082,12 @@ export const NebulaCanvas = forwardRef<NebulaCanvasHandle, Props>(function Nebul
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!engineRef.current) return;
+    const engine = engineRef.current;
+    engine.setValenceMix(valence);
+  }, [valence]);
 
   useEffect(() => {
     if (!engineRef.current) return;
