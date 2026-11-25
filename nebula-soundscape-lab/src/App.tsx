@@ -9,7 +9,8 @@ import { NebulaAudioEngine } from './audio/NebulaAudioEngine';
 import { analyzeEmotion } from './utils/emotionParser';
 import { buildShareUrl, readStateFromHash, writeStateToHash } from './utils/urlState';
 import { downloadDataUrl, generatePostcard } from './utils/postcardGenerator';
-import type { EmotionVector, Palette, PresetId } from './types';
+import type { EmotionVector, Palette, PresetId, ScaleId, TimbreId } from './types';
+import { scaleDisplayName } from './audio/scales';
 
 interface Stats {
   fps: number;
@@ -35,11 +36,24 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [audioLive, setAudioLive] = useState(false);
+  // 音色 / 音阶：null = 跟随星体预设（音色取 preset.timbre，音阶取 preset.scale）
+  const [timbreOverride, setTimbreOverride] = useState<TimbreId | null>(null);
+  const [scaleOverride, setScaleOverride] = useState<ScaleId | null>(null);
 
   const canvasRef = useRef<NebulaCanvasHandle>(null);
   const audio = useMemo(() => NebulaAudioEngine.getInstance(), []);
   const preset = useMemo(() => getPreset(presetId), [presetId]);
   const isIdle = presetId === GALAXY_IDLE.id;
+  const timbre: TimbreId = timbreOverride ?? preset.timbre;
+  const scaleId: ScaleId = scaleOverride ?? 'preset';
+  const scaleName = scaleDisplayName(preset, scaleId);
+
+  // ---- 音色 / 音阶同步到音频引擎（预设变化或用户手动切换时生效） ----
+  useEffect(() => {
+    if (!audio.ready) return;
+    audio.setTimbre(timbre);
+    audio.setScale(scaleId);
+  }, [audio, timbre, scaleId, audioLive]);
 
   // ---- 启动时还原 URL Hash 状态 ----
   useEffect(() => {
@@ -161,6 +175,9 @@ export default function App() {
     setSpeed(preset.speed);
   }, [preset]);
 
+  const handleTimbre = useCallback((id: TimbreId) => setTimbreOverride(id), []);
+  const handleScale = useCallback((id: ScaleId) => setScaleOverride(id === 'preset' ? null : id), []);
+
   const handleVolume = useCallback(
     (v: number) => {
       setVolume(v);
@@ -270,7 +287,7 @@ export default function App() {
         </div>
         <div className="animate-fade-in text-right" style={{ animationDelay: '150ms' }}>
           <div className="text-[9px] tracking-[0.24em] text-white/35 sm:text-[10px]">SCALE</div>
-          <div className="mt-1 text-[11px] text-white/70 sm:text-[12px]">{preset.scaleName}</div>
+          <div className="mt-1 text-[11px] text-white/70 sm:text-[12px]">{scaleName}</div>
           {stats && (
             <div className="mt-1 font-mono text-[9px] tracking-wider text-white/25 sm:text-[10px]">
               {stats.count.toLocaleString()} PARTICLES · {stats.fps} FPS
@@ -336,6 +353,10 @@ export default function App() {
           onCapture={handleCapture}
           onShare={handleCopyLink}
           busy={busy}
+          timbre={timbre}
+          scaleId={scaleId}
+          onTimbre={handleTimbre}
+          onScale={handleScale}
         />
       )}
 

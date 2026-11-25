@@ -111,6 +111,7 @@ uniform float uShear;             // 开普勒差速强度
 uniform float uBass;
 uniform float uMid;
 uniform float uTreble;
+uniform float uEnergy;            // 潮汐呼吸慢包络 0~1（总 RMS × 旋律潮汐，damp 平滑）
 uniform float uCollapse;
 uniform float uShockRadius;
 uniform float uShockAmp;
@@ -165,8 +166,8 @@ void main() {
   // ================= 2. 分形态动态物理 =================
   float r = length(base.xz);
 
-  // 2.1 自转 + 开普勒差速（内快外慢）
-  float omega = uBehavior.x * (1.0 + uShear * role / (0.35 + r));
+  // 2.1 自转 + 开普勒差速（内快外慢）；角速度随潮汐能量与中频起伏：高潮加速、低落近于静止
+  float omega = uBehavior.x * (0.4 + uEnergy * 1.4 + uMid * 0.6) * (1.0 + uShear * role / (0.35 + r));
   base.xz = rot2(base.xz, t * omega);
 
   // 2.2 径向脉冲（随低频能量呼吸）
@@ -187,6 +188,11 @@ void main() {
   float n1 = snoise(np + vec3(0.0, t * 0.12, 0.0));
   float n2 = snoise(np * 1.8 + vec3(7.3, -t * 0.15, 3.1));
   base += vec3(n1, n2 * 0.7, n1 * 0.5) * uBehavior.w * (0.1 + 0.22 * role) * (0.6 + uMid * 1.3);
+
+  // 2.5 潮汐呼吸（涨起 / 沉落）：高潮整体向外扩张 +18% 并微幅上浮，低落向中心收敛 -12% 并缓缓下沉
+  float breathe = 0.88 + uEnergy * 0.30;
+  base *= breathe;
+  base.y += (uEnergy - 0.5) * 0.25;
 
   // ================= 3. 全局交互形变 =================
   // 坍缩
@@ -214,7 +220,10 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
 
   float twinkle = 1.0 + uTreble * role * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
-  float sizePx = sizeT * uSize * uPixelRatio * twinkle * (1.0 + uBass * 0.35 * role + burst * 1.8);
+  // 低频推核心脉冲尺寸，高频推外围星尘闪烁尺寸，潮汐高潮整体更饱满
+  float sizePx = sizeT * uSize * uPixelRatio * twinkle
+    * (1.0 + uBass * 0.35 * role + burst * 1.8)
+    * (0.85 + uEnergy * 0.30 + uTreble * 0.30 * role);
   gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
   gl_Position = projectionMatrix * mv;
 
@@ -226,12 +235,14 @@ void main() {
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
   vColor = mix(grad, aColor, colorW);
 
+  // 潮汐明暗呼吸：高潮泛光更亮，低落压暗到深空微光（±约 15%）
   vGlow = (1.0 - colorT) * 0.4
         + role * 0.12
         + uBass * 0.35 * (1.0 - colorT)
         + burst * 2.4
-        + wave * 1.4;
-  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade;
+        + wave * 1.4
+        + (uEnergy - 0.5) * 0.3;
+  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2);
 }
 `;
 

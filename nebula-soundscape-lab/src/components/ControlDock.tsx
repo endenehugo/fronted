@@ -1,7 +1,9 @@
-import { Camera, Link2, Music2, Sparkles, Volume1, Volume2, VolumeX, X } from 'lucide-react';
+import { AudioLines, Camera, ChevronDown, Link2, Music2, Sparkles, Volume1, Volume2, VolumeX, X } from 'lucide-react';
 import type { FormEvent, ReactNode } from 'react';
-import type { NebulaPreset, PresetId } from '../types';
+import type { NebulaPreset, PresetId, ScaleId, TimbreId } from '../types';
 import { PRESET_MAP, type Inspiration } from '../visual/presets';
+import { SCALE_LIBRARY, scaleDisplayName } from '../audio/scales';
+import { TIMBRE_LIST } from '../audio/timbres';
 
 interface Props {
   /** idle：待机大星系（灵感词 + 心情输入）；body：具体星体（信息 + 切换 + 输入 + 定格） */
@@ -23,6 +25,11 @@ interface Props {
   onCapture: () => void;
   onShare: () => void;
   busy: boolean;
+  /** 当前生效的音色 / 音阶（音阶 'preset' = 跟随星体自带调式） */
+  timbre: TimbreId;
+  scaleId: ScaleId;
+  onTimbre: (id: TimbreId) => void;
+  onScale: (id: ScaleId) => void;
 }
 
 const chipClass = (active: boolean): string =>
@@ -60,12 +67,56 @@ function Chip({
   );
 }
 
+/** 紧凑的玻璃拟态下拉选择器（音色 / 音阶），原生 select 以保持键盘与移动端可用 */
+function GlassSelect<T extends string>({
+  icon,
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: T;
+  options: { id: T; name: string; title?: string }[];
+  onChange: (id: T) => void;
+}) {
+  const current = options.find((o) => o.id === value);
+  return (
+    <label
+      title={current?.title ?? label}
+      className="group flex shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-[12px] text-white/70 transition-colors hover:border-white/25 hover:bg-white/[0.08] hover:text-white"
+    >
+      {icon}
+      <span className="hidden text-white/40 md:inline">{label}</span>
+      <span className="relative flex items-center">
+        <select
+          aria-label={label}
+          value={value}
+          onChange={(e) => onChange(e.target.value as T)}
+          style={{ colorScheme: 'dark' }}
+          className="cursor-pointer appearance-none truncate bg-transparent pr-3.5 text-[12px] text-white/85 focus:outline-none"
+        >
+          {options.map((o) => (
+            <option key={o.id} value={o.id} className="bg-[#0b0d18] text-white">
+              {o.name}
+            </option>
+          ))}
+        </select>
+        <ChevronDown size={11} className="pointer-events-none absolute right-0 text-white/40 transition-colors group-hover:text-white/70" />
+      </span>
+    </label>
+  );
+}
+
 /** 底部悬浮玻璃拟态控制栏 */
 export default function ControlDock(props: Props) {
   const { mode, preset, inspirations, presets, activeId, onSelect, onInspire } = props;
   const { value, onChange, onSubmit, onClear } = props;
   const { volume, muted, onVolume, onToggleMute, onCapture, onShare, busy } = props;
+  const { timbre, scaleId, onTimbre, onScale } = props;
   const idle = mode === 'idle';
+  const scaleName = scaleDisplayName(preset, scaleId);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -95,7 +146,7 @@ export default function ControlDock(props: Props) {
             <div className="hidden shrink-0 items-center gap-1.5 text-[11px] text-white/45 lg:flex">
               <Music2 size={12} />
               <span>
-                按 <span className="font-mono text-white/75">A – L</span> 拨弦 · {preset.scaleName}
+                按 <span className="font-mono text-white/75">A – L</span> 拨弦 · {scaleName}
               </span>
             </div>
             <button
@@ -139,6 +190,25 @@ export default function ControlDock(props: Props) {
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* 音色 / 音阶 紧凑选择器 */}
+            <GlassSelect
+              icon={<AudioLines size={13} />}
+              label="音色"
+              value={timbre}
+              options={TIMBRE_LIST.map((t) => ({ id: t.id, name: t.name, title: `${t.name} · ${t.recipe}` }))}
+              onChange={onTimbre}
+            />
+            <GlassSelect
+              icon={<Music2 size={13} />}
+              label="音阶"
+              value={scaleId}
+              options={[
+                { id: 'preset' as ScaleId, name: '跟随星体', title: `跟随当前星体自带的调式 · ${preset.scaleName}` },
+                ...SCALE_LIBRARY.map((s) => ({ id: s.id as ScaleId, name: s.name, title: `${s.name} · ${s.mood}` })),
+              ]}
+              onChange={onScale}
+            />
+
             {/* 音量 */}
             <div className="hidden items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1.5 sm:flex">
               <button

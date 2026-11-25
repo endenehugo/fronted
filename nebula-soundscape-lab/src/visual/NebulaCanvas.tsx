@@ -55,6 +55,15 @@ const SWIRL_AMP = 1.1;
 /** 相机指数阻尼系数 λ：1.6 时 2.8s 内收敛到 99%，与「星际潜入」形变同长 */
 const CAM_DAMP = 1.6;
 
+/**
+ * 潮汐呼吸慢包络 uEnergy 的阻尼系数：上升 ≈0.5s、回落 ≈1.8s 收敛到 95%
+ * （damp(x, target, λ, dt) = 1 − exp(−λ·dt)，95% 对应 t = 3/λ）
+ */
+const ENERGY_DAMP_RISE = 6;
+const ENERGY_DAMP_FALL = 1.7;
+/** 音频未就绪时的包络基线：画面保持中低位的静息呼吸，而非压到最暗 */
+const ENERGY_IDLE = 0.35;
+
 /** 背景星野恒星数（桌面 / 移动） */
 const STARFIELD_COUNT = { desktop: 3500, mobile: 2000 };
 
@@ -143,6 +152,9 @@ class NebulaEngine {
   private sizeCurrent = 1;
   private coreTarget = 0.4;
   private coreCurrent = 0.4;
+
+  /** 潮汐呼吸慢包络：目标由 总 RMS × 旋律潮汐 合成，上升 / 回落用不同 λ 阻尼 */
+  private energyCurrent = ENERGY_IDLE;
 
   // 分形态动态物理
   private behaviorTarget = new THREE.Vector4(0.2, 0.1, 0, 0.1);
@@ -245,6 +257,7 @@ class NebulaEngine {
       uBass: { value: 0 },
       uMid: { value: 0 },
       uTreble: { value: 0 },
+      uEnergy: { value: ENERGY_IDLE },
       uCollapse: { value: 1 },
       uShockRadius: { value: 0 },
       uShockAmp: { value: 0 },
@@ -797,6 +810,20 @@ class NebulaEngine {
     this.uniforms.uMid.value = bands.mid;
     this.uniforms.uTreble.value = bands.treble;
 
+    // 潮汐呼吸慢包络：潮汐强度为主、瞬时 RMS 为辅；上升快（0.5s）、回落慢（1.8s）
+    const audioOn = this.audio.ready;
+    const energyTarget = audioOn
+      ? Math.min(1, bands.tide * 0.55 + bands.level * 0.55 + bands.tide * bands.level * 0.1)
+      : ENERGY_IDLE;
+    this.energyCurrent = THREE.MathUtils.damp(
+      this.energyCurrent,
+      energyTarget,
+      energyTarget > this.energyCurrent ? ENERGY_DAMP_RISE : ENERGY_DAMP_FALL,
+      dt,
+    );
+    const energy = this.energyCurrent;
+    this.uniforms.uEnergy.value = energy;
+
     // 视觉参数逐帧指数阻尼（MathUtils.damp 即 1 - exp(-lambda·dt)，帧率无关）
     this.bloomCurrent = THREE.MathUtils.damp(this.bloomCurrent, this.bloomTarget, 3.0, dt);
     this.bloomKick *= Math.exp(-dt * 1.8);
@@ -879,15 +906,16 @@ class NebulaEngine {
     this.starfield.rotation.y += dt * 0.004;
     this.starMaterial.uniforms.uTime.value = t;
 
-    // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
+    // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）；潮汐高潮核心额外胀大
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
-    this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6) * (0.3 + coreK * 0.8));
-    coreMat.opacity = (0.08 + bands.bass * 0.12) * coreK;
+    this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6 + energy * 0.25) * (0.3 + coreK * 0.8));
+    coreMat.opacity = (0.08 + bands.bass * 0.12 + energy * 0.06) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
-    // Bloom 随低频脉动
-    this.bloom.strength = this.bloomCurrent * 0.92 + bands.bass * 0.95 + this.bloomKick;
+    // Bloom 随低频脉动，并随潮汐呼吸明暗：高潮璀璨泛光，低落压暗至深空微光
+    this.bloom.strength =
+      this.bloomCurrent * (0.7 + energy * 0.45) * 0.92 + bands.bass * 0.95 + this.bloomKick;
 
     // 帧率监控：低帧率自动降级
     this.warmup += dt;
@@ -914,6 +942,9 @@ class NebulaEngine {
         burst: +this.burstAmp.toFixed(2),
         collapse: +this.collapse.toFixed(2),
         shock: this.shockActive,
+        energy: +this.energyCurrent.toFixed(3),
+        tide: +bands.tide.toFixed(3),
+        level: +bands.level.toFixed(3),
       });
       this.lowFpsStreak = !throttled && fps < 42 ? this.lowFpsStreak + 1 : 0;
       // 形变进行中不降级：重建几何会把粒子直接瞬移到目标形态，等落定后再降

@@ -192,6 +192,32 @@ src/
 
 ---
 
+### 10. 八种程序化音色 · 音阶切换器 · 潮汐呼吸
+
+- **`playNote(freq, velocity, timbre, opts)`**（`NebulaAudioEngine.ts`）是唯一发声入口，替换了原先的单一 FM 铃铛；所有振幅包络都是 `0.0001 →(指数爬坡 attack)→ 峰值 →(指数衰减 release)→ 0.0001`，杜绝爆音。同时发声上限 48（`MAX_VOICES`），超出直接丢弃。音色清单见 `audio/timbres.ts`：
+
+  | id | 名称 | 合成配方 | 起音 / 释放 | 预设默认绑定 |
+  |---|---|---|---|---|
+  | `crystal_bowl` | 水晶颂钵 | `1f + 2.756f + 5.404f` 三正弦，±3 cents 失谐 | 0.35s / 3.2s | 仙女座待机态 |
+  | `pluck_harp` | 尼龙拨弦 | 三角波，低通 3200→320Hz（0.25s 指数衰减） | 0.01s / 1.4s | 红巨星 · 释放 |
+  | `cosmic_rhodes` | 太空电钢 | FM（载波 1f、调制 2f，深度 0.15s 衰减）+ 低通 + 0.4Hz 立体声摇摆 | 0.02s / 2.4s | 暗物质 · 深思 |
+  | `vibraphone` | 太空颤音琴 | `1f` 正弦 + `3.98f` 短衰减金属泛音 + 5.5Hz 音量颤音 | 0.01s / 2.6s | 猎户座 · 静谧 |
+  | `synth_pad` | 温暖垫音 | 三角 / 锯齿 ±7 cents + 慢扫频低通 380→2400→700Hz | 0.5s / 2.5s | 高潮底层垫音 |
+  | `nebula_brass` | 深空号角 | 三锯齿 −8/0/+8 cents + 共振低通 180→1600Hz（0.6s） | 0.35s / 2.0s | 超新星 · 狂喜 |
+  | `ethereal_choir` | 空灵合唱 | 失谐锯齿并联三母音共振峰带通 320 / 800 / 2500Hz | 0.6s / 2.6s | 创生之柱 · 治愈 |
+  | `arp_pluck` | 脉冲琶音 | 锯齿 + `0.5f` 正弦 + 高共振低通 3600→240Hz（0.12s） | 0.005s / 0.9s | 脉冲星 · 专注 |
+
+  每个情绪预设通过 `NebulaPreset.timbre` 绑定推荐音色；控制栏手动切换后 `timbreLocked` 置位，换星体不再回落。键盘拨弦 / 点击 / 悬停 / 落定确认音都走当前音色。
+- **音阶切换器**（`scales.ts`）：`SCALE_LIBRARY` 含大调五声、自然小调、多利亚、利底亚、弗里吉亚五种调式（音程数组，`buildScale` 按 MIDI→Hz 换算，`A3 = 220Hz` / `C4` 为基准）。`presetScale(preset, scaleId)`：`'preset'` 沿用星体自带调式，否则以星体主音为根套用调式库；顶栏与控制栏实时显示 `scaleDisplayName`。
+- **潮汐起伏自动旋律**：`tideAt(t) = (0.5 − 0.5·cos(2πt/14))^1.6`，14s 一个周期、低潮段被拉长。八分音符步进时按潮汐取密度：低潮约每 2.5s 一颗单音，高潮逼近每步一颗；`tide > 0.55` 概率叠加三度 / 四度双音，`tide > 0.8` 再垫一颗低八度 `synth_pad`；同时每拍把 Drone 增益 `setTargetAtTime(基线 × (1 + tide × 1.1), τ=0.4)` 推升（潜入过渡的 Drone 避让窗口内不介入）。待机大星系整体密度 ×0.22。
+- **视觉「潮汐呼吸」四维同步**（`NebulaCanvas.tsx` / `nebulaShaders.ts`）：
+  - 慢包络 `uEnergy`：目标 = `tide × 0.55 + level × 0.55 + tide × level × 0.1`（`level` 为时域 RMS，已扣除 Drone 本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
+  - ① 整体缩放与沉浮：`base *= 0.88 + uEnergy × 0.30`（高潮 +18%、低落 −12%），`base.y += (uEnergy − 0.5) × 0.25`。
+  - ② 旋臂转速：`omega = uBehavior.x × (0.4 + uEnergy × 1.4 + uMid × 0.6) × 差速项`。
+  - ③ 粒子与核心：`gl_PointSize × (0.85 + uEnergy × 0.30 + uTreble × 0.30 × role)`，核心 Sprite 随 `uBass` 脉冲并随 `uEnergy` 额外胀大。
+  - ④ 辉光明暗：`vGlow += (uEnergy − 0.5) × 0.3`、`vAlpha × (0.82 + uEnergy × 0.2)`，`UnrealBloomPass.strength = bloomCurrent × (0.7 + uEnergy × 0.45) × 0.92 + bass × 0.95 + kick`。
+- **控制栏**（`ControlDock.tsx`）：「音色」「音阶」两个玻璃拟态原生 `select`（`GlassSelect`，`colorScheme: dark`），位于音量左侧，`md` 以下隐藏文字标签只留图标与当前值。
+
 ## 五、验收对照
 
 ### 阶段一 · 视觉底座

@@ -1,11 +1,34 @@
-import type { NebulaPreset } from '../types';
+import type { NebulaPreset, ScaleId, TimbreId } from '../types';
 import { presetDrone, presetScale } from './scales';
 
 export interface AudioBands {
   bass: number;
   mid: number;
   treble: number;
+  /** 总 RMS 音量（0~1，已扣除 Drone 本底并按高潮段满刻度归一化；静音为 0） */
+  level: number;
+  /** 旋律潮汐强度（0~1，14s 周期） */
+  tide: number;
 }
+
+/** 同时发声的上限：超出后新音符直接丢弃，防止高潮期叠和弦把 CPU 打满 */
+const MAX_VOICES = 48;
+/** 潮汐周期（秒） */
+export const TIDE_PERIOD = 14;
+
+/** 各音色相对响度补偿：锯齿 / 合成垫音能量高，统一压到与正弦铃相近的响度 */
+const TIMBRE_GAIN: Record<TimbreId, number> = {
+  crystal_bowl: 1,
+  pluck_harp: 0.9,
+  cosmic_rhodes: 1,
+  vibraphone: 1,
+  synth_pad: 0.32,
+  nebula_brass: 0.26,
+  ethereal_choir: 0.3,
+  arp_pluck: 0.5,
+};
+
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
 interface DroneLayer {
   oscs: OscillatorNode[];
@@ -30,11 +53,12 @@ interface Riser {
  *
  * 四层声音架构：
  *  1. Ambient Drone   深空环境铺底（微失谐振荡器 + 低通 + LFO）
- *  2. Generative Chimes 自动星辰旋律（马尔可夫音级游走 + 立体声延迟）
- *  3. Interactive Synth 交互即时响应（FM 钟琴音色，Attack 15ms / Release 1.8s）
+ *  2. Generative Chimes 自动星辰旋律（马尔可夫音级游走 + 14s 潮汐密度曲线 + 立体声延迟）
+ *  3. Interactive Synth 交互即时响应（8 种纯程序化音色，见 playNote）
  *  4. Solar Wind      宇宙背景噪波（粉红噪声 + 带通滤波）
  *
  * 所有声音均由 Web Audio API 实时合成，零外部音频资源。
+ * 所有增益包络都从 0.0001 指数爬坡、再指数回落到 0.0001，杜绝爆音。
  */
 export class NebulaAudioEngine {
   private static instance: NebulaAudioEngine | null = null;
@@ -60,20 +84,37 @@ export class NebulaAudioEngine {
   private riser: Riser | null = null;
   /** 生成旋律总线：待机态压低、进入星体后随低通一起渐入（键盘 / 点击等交互音不走此总线） */
   private melody: GainNode | null = null;
-  private melodyDensity = 0.4;
 
   private preset: NebulaPreset | null = null;
   private scale: number[] = [];
+  /** 当前音阶：'preset' 跟随星体，否则为全局调式库 */
+  private scaleId: ScaleId = 'preset';
+  /** 当前音色；timbreLocked 为 true 表示用户手动选过，换星体时不再回落到预设推荐音色 */
+  private timbre: TimbreId = 'crystal_bowl';
+  private timbreLocked = false;
+  /** 进行中的发声数（用于 MAX_VOICES 限流） */
+  private voices = 0;
+  /** 潜入过渡期间 Drone 让位给过渡音，此时间戳之前不做潮汐推升 */
+  private droneHoldUntil = 0;
   private volume = 0.75;
   private schedulerId: number | null = null;
   private nextNoteTime = 0;
   private lastDegree = 0;
 
   private freqData: Uint8Array<ArrayBuffer> | null = null;
-  private bands: AudioBands = { bass: 0, mid: 0, treble: 0 };
+  private timeData: Uint8Array<ArrayBuffer> | null = null;
+  private bands: AudioBands = { bass: 0, mid: 0, treble: 0, level: 0, tide: 0 };
 
   get ready(): boolean {
     return !!this.ctx && this.ctx.state === 'running';
+  }
+
+  get currentTimbre(): TimbreId {
+    return this.timbre;
+  }
+
+  get currentScale(): ScaleId {
+    return this.scaleId;
   }
 
   // ---------------------------------------------------------------- 初始化
@@ -118,6 +159,7 @@ export class NebulaAudioEngine {
     this.analyser.connect(ctx.destination);
 
     this.freqData = new Uint8Array(this.analyser.frequencyBinCount);
+    this.timeData = new Uint8Array(this.analyser.fftSize);
 
     this.buildReverb();
     this.buildMelodyBus();
@@ -290,7 +332,9 @@ export class NebulaAudioEngine {
 
   setPreset(preset: NebulaPreset): void {
     this.preset = preset;
-    this.scale = presetScale(preset);
+    // 用户手动选过音色则保留，否则回落到该星体推荐音色
+    if (!this.timbreLocked) this.timbre = preset.timbre;
+    this.scale = presetScale(preset, this.scaleId);
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
 
@@ -317,7 +361,30 @@ export class NebulaAudioEngine {
     }
 
     this.melody?.gain.setTargetAtTime(idle ? 0.08 : 1, t, tau);
-    this.melodyDensity = idle ? 0.08 : 0.4;
+  }
+
+  /** 手动切换音色：之后换星体也不再回落到推荐音色 */
+  setTimbre(id: TimbreId): void {
+    this.timbre = id;
+    this.timbreLocked = true;
+  }
+
+  /** 切换音阶：'preset' 跟随星体自带调式；对正在发声的音符无影响，下一颗音起生效 */
+  setScale(id: ScaleId): void {
+    this.scaleId = id;
+    if (this.preset) this.scale = presetScale(this.preset, id);
+    this.lastDegree = 0;
+  }
+
+  /** 潮汐强度 0~1：14s 一个周期，x = 1 − cos 的半波再做 1.6 次幂，低潮段被拉长 */
+  tideAt(time: number): number {
+    const x = 0.5 - 0.5 * Math.cos((Math.PI * 2 * time) / TIDE_PERIOD);
+    return Math.pow(x, 1.6);
+  }
+
+  /** 当前时刻的潮汐强度（音频未就绪时为 0，视觉保持低落静止） */
+  getTide(): number {
+    return this.ctx ? this.tideAt(this.ctx.currentTime) : 0;
   }
 
   /** Drone 增益目标：待机铺底更厚，星体按湍流微调 */
@@ -344,19 +411,44 @@ export class NebulaAudioEngine {
     this.nextNoteTime = this.ctx.currentTime + 0.5;
     this.schedulerId = window.setInterval(() => {
       if (!this.ctx || !this.preset) return;
+      const now = this.ctx.currentTime;
       const bpm = this.preset.bpm;
       const step = 60 / bpm / 2; // 八分音符
-      while (this.nextNoteTime < this.ctx.currentTime + 0.35) {
-        if (Math.random() < this.melodyDensity) {
-          this.scheduleChime(this.nextNoteTime);
-        }
+      // 潮汐推升：高潮时底层 Drone 音量随之上涨（τ=0.4 平滑，潜入过渡期间让位）
+      this.pushDrone(this.tideAt(now), now);
+      while (this.nextNoteTime < now + 0.35) {
+        this.scheduleStep(this.nextNoteTime, step);
         this.nextNoteTime += step;
       }
     }, 110);
   }
 
-  /** 马尔可夫音级游走：偏好小音程，保证任意旋律都和谐 */
-  private scheduleChime(time: number): void {
+  /**
+   * 潮汐密度曲线（14s 周期）驱动的一个八分音符步：
+   *  低潮（tide→0）约每 2.5s 才落一颗单音；高潮（tide→1）密度逼近每个八分音符一颗。
+   *  待机大星系整体乘 0.22，保持深空稀疏。
+   */
+  private scheduleStep(time: number, step: number): void {
+    const tide = this.tideAt(time);
+    const idleK = this.preset?.id === 'galaxy_idle' ? 0.22 : 1;
+    const lowDensity = Math.min(0.5, step / 2.5); // step / 2.5s ≈ 每 2~3 秒一颗
+    const density = lerp(lowDensity, 0.85, tide) * idleK;
+    if (Math.random() >= density) return;
+    this.scheduleChime(time, tide);
+  }
+
+  /** Drone 潮汐推升：高潮最多抬到基线的 2.1 倍，低潮回到基线 */
+  private pushDrone(tide: number, now: number): void {
+    if (!this.drone || !this.preset || now < this.droneHoldUntil) return;
+    const target = this.droneGainTarget(this.preset) * (1 + tide * 1.1);
+    this.drone.gain.gain.setTargetAtTime(target, now, 0.4);
+  }
+
+  /**
+   * 马尔可夫音级游走：偏好小音程，保证任意旋律都和谐。
+   * tide > 0.55 后概率叠加双音（三度 / 四度），tide > 0.8 再垫一颗低八度垫音。
+   */
+  private scheduleChime(time: number, tide: number): void {
     if (!this.ctx || this.scale.length === 0) return;
     const offsets = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5];
     const weights = [2.2, 3.0, 2.4, 1.7, 1.3, 0.85, 0.7, 0.45, 0.35, 0.22, 0.15];
@@ -372,93 +464,273 @@ export class NebulaAudioEngine {
     }
     const n = this.scale.length;
     this.lastDegree = (this.lastDegree + pick + n) % n;
-    const freq = this.scale[this.lastDegree] * (Math.random() < 0.16 ? 2 : 1);
-    this.bell(freq, 0.085 + Math.random() * 0.075, time, (Math.random() * 2 - 1) * 0.75, 2.8, this.melody ?? undefined);
+    const degree = this.lastDegree;
+    const freq = this.scale[degree] * (Math.random() < 0.16 ? 2 : 1);
+    const pan = (Math.random() * 2 - 1) * 0.75;
+    const dest = this.melody ?? undefined;
+    this.playNote(freq, 0.085 + tide * 0.05 + Math.random() * 0.075, this.timbre, { when: time, pan, dest });
+
+    // 高潮双音和弦
+    if (tide > 0.55 && Math.random() < (tide - 0.55) * 1.8) {
+      const interval = Math.random() < 0.5 ? 2 : 3;
+      const dyad = this.scale[(degree + interval) % n] * (degree + interval >= n ? 2 : 1);
+      this.playNote(dyad, 0.05 + tide * 0.045, this.timbre, {
+        when: time + 0.035,
+        pan: -pan * 0.6,
+        dest,
+      });
+    }
+    // 高潮底层垫音：低八度，用温暖垫音音色
+    if (tide > 0.8 && Math.random() < 0.3) {
+      const bass = this.scale[degree % n] / 4;
+      this.playNote(bass, 0.09 * tide, 'synth_pad', { when: time, pan: 0, dest });
+    }
   }
 
+  // ---------------------------------------------------------------- 八种程序化音色
+
   /**
-   * 钟琴音色：FM 调制 + 三倍频泛音，Attack 15ms / 长 Release。
-   * dest 指定输出总线（生成旋律走 melody 总线以便渐入渐出）；缺省直连 master 并送混响。
+   * 统一发声入口：按音色合成一颗音符。
+   * @param freq     频率 Hz
+   * @param velocity 力度 0~1（0.1 左右为常规旋律音）
+   * @param timbre   音色，缺省为当前音色
+   * @param opts.when 调度时刻（缺省立即）；pan 立体声位置 -1~1；dest 输出总线（缺省 master + 延迟混响）
+   *
+   * 所有振幅包络：0.0001 →（指数爬坡 attack）→ 峰值 →（指数衰减 release）→ 0.0001。
    */
-  private bell(
+  playNote(
     freq: number,
-    vel: number,
-    when: number,
-    pan: number,
-    dur: number,
-    dest?: AudioNode,
+    velocity = 1,
+    timbre: TimbreId = this.timbre,
+    opts: { when?: number; pan?: number; dest?: AudioNode } = {},
   ): void {
-    const ctx = this.ctx!;
-    const t = Math.max(when, ctx.currentTime);
+    if (!this.ctx || this.voices >= MAX_VOICES || freq <= 0) return;
+    const ctx = this.ctx;
+    const t = Math.max(opts.when ?? ctx.currentTime, ctx.currentTime);
+    const pan = opts.pan ?? 0;
+    const dest = opts.dest;
+    const peak = Math.max(0.0002, velocity) * (TIMBRE_GAIN[timbre] ?? 1);
 
     const amp = ctx.createGain();
     const panner = ctx.createStereoPanner();
     panner.pan.value = pan;
-
-    const carrier = ctx.createOscillator();
-    carrier.type = 'sine';
-    carrier.frequency.value = freq;
-
-    const mod = ctx.createOscillator();
-    mod.type = 'sine';
-    mod.frequency.value = freq * 2.0;
-    const modGain = ctx.createGain();
-    modGain.gain.setValueAtTime(freq * 1.1, t);
-    modGain.gain.exponentialRampToValueAtTime(freq * 0.01, t + dur * 0.7);
-    mod.connect(modGain);
-    modGain.connect(carrier.frequency);
-
-    const shimmer = ctx.createOscillator();
-    shimmer.type = 'sine';
-    shimmer.frequency.value = freq * 3.01;
-    const shimmerGain = ctx.createGain();
-    shimmerGain.gain.value = 0.12;
-
-    amp.gain.setValueAtTime(0.0001, t);
-    amp.gain.exponentialRampToValueAtTime(Math.max(0.0002, vel), t + 0.015);
-    amp.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-
-    carrier.connect(amp);
-    shimmer.connect(shimmerGain);
-    shimmerGain.connect(amp);
     amp.connect(panner);
     panner.connect(dest ?? this.master);
     if (!dest) panner.connect(this.delaySend);
 
-    carrier.start(t);
-    mod.start(t);
-    shimmer.start(t);
-    const end = t + dur + 0.05;
-    carrier.stop(end);
-    mod.stop(end);
-    shimmer.stop(end);
+    const stops: AudioScheduledSourceNode[] = [];
+    const osc = (type: OscillatorType, f: number, detune = 0): OscillatorNode => {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = f;
+      o.detune.value = detune;
+      stops.push(o);
+      return o;
+    };
+    const gain = (g: number): GainNode => {
+      const n = ctx.createGain();
+      n.gain.value = g;
+      return n;
+    };
+    const filter = (type: BiquadFilterType, f: number, q: number): BiquadFilterNode => {
+      const n = ctx.createBiquadFilter();
+      n.type = type;
+      n.frequency.value = f;
+      n.Q.value = q;
+      return n;
+    };
+    /** 振幅包络：attack 内指数爬到峰值，随后 release 内指数衰减到静音 */
+    const env = (attack: number, release: number): number => {
+      amp.gain.setValueAtTime(0.0001, t);
+      amp.gain.exponentialRampToValueAtTime(peak, t + attack);
+      amp.gain.exponentialRampToValueAtTime(0.0001, t + attack + release);
+      return t + attack + release;
+    };
+    /** 把振荡器接入一个单极点低通再进 amp */
+    const throughLowpass = (srcs: AudioNode[], f: number, q: number): BiquadFilterNode => {
+      const lp = filter('lowpass', f, q);
+      srcs.forEach((s) => s.connect(lp));
+      lp.connect(amp);
+      return lp;
+    };
+
+    let end = t;
+    switch (timbre) {
+      // 1. 水晶颂钵：1f + 2.756f + 5.404f 三正弦，微失谐 ±3 cents，慢起音 0.35s，长释放 3.2s
+      case 'crystal_bowl': {
+        const parts: [number, number, number][] = [
+          [1, 1, -3],
+          [2.756, 0.28, 3],
+          [5.404, 0.1, -3],
+        ];
+        for (const [ratio, g, det] of parts) {
+          const o = osc('sine', freq * ratio, det);
+          const pg = gain(g);
+          o.connect(pg);
+          pg.connect(amp);
+        }
+        end = env(0.35, 3.2);
+        break;
+      }
+
+      // 2. 尼龙拨弦：三角波，低通 3200Hz → 320Hz（0.25s 指数衰减），起音 0.01s，释放 1.4s
+      case 'pluck_harp': {
+        const o = osc('triangle', freq);
+        const lp = throughLowpass([o], 3200, 1);
+        lp.frequency.setValueAtTime(3200, t);
+        lp.frequency.exponentialRampToValueAtTime(320, t + 0.25);
+        end = env(0.01, 1.4);
+        break;
+      }
+
+      // 3. 太空电钢：FM（载波 1f，调制波 2f，调制深度 0.15s 快速衰减）+ 低通 + 0.4Hz 立体声摇摆
+      case 'cosmic_rhodes': {
+        const carrier = osc('sine', freq);
+        const mod = osc('sine', freq * 2);
+        const modGain = gain(1);
+        modGain.gain.setValueAtTime(freq * 1.6, t);
+        modGain.gain.exponentialRampToValueAtTime(freq * 0.01, t + 0.15);
+        mod.connect(modGain);
+        modGain.connect(carrier.frequency);
+        throughLowpass([carrier], 2600, 0.8);
+        const lfo = osc('sine', 0.4);
+        const lfoGain = gain(0.55);
+        lfo.connect(lfoGain);
+        lfoGain.connect(panner.pan);
+        end = env(0.02, 2.4);
+        break;
+      }
+
+      // 4. 太空颤音琴：1f 正弦 + 3.98f 短衰减金属泛音 + 5.5Hz LFO 音量颤音
+      case 'vibraphone': {
+        const trem = gain(0.78);
+        trem.connect(amp);
+        const o1 = osc('sine', freq);
+        const g1 = gain(0.85);
+        o1.connect(g1);
+        g1.connect(trem);
+        const o2 = osc('sine', freq * 3.98);
+        const g2 = gain(1);
+        g2.gain.setValueAtTime(0.25, t);
+        g2.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+        o2.connect(g2);
+        g2.connect(trem);
+        const lfo = osc('sine', 5.5);
+        const lfoGain = gain(0.22);
+        lfo.connect(lfoGain);
+        lfoGain.connect(trem.gain);
+        end = env(0.01, 2.6);
+        break;
+      }
+
+      // 5. 温暖垫音：三角 / 锯齿 ±7 cents 失谐 + 慢扫频低通，起音 0.5s，释放 2.5s
+      case 'synth_pad': {
+        const o1 = osc('triangle', freq, -7);
+        const o2 = osc('sawtooth', freq, 7);
+        const g1 = gain(0.6);
+        const g2 = gain(0.4);
+        o1.connect(g1);
+        o2.connect(g2);
+        const lp = throughLowpass([g1, g2], 380, 0.9);
+        lp.frequency.setValueAtTime(380, t);
+        lp.frequency.exponentialRampToValueAtTime(2400, t + 1.4);
+        lp.frequency.exponentialRampToValueAtTime(700, t + 3.0);
+        end = env(0.5, 2.5);
+        break;
+      }
+
+      // 6. 深空号角：三锯齿（-8 / 0 / +8 cents）+ 共振低通 180Hz → 1600Hz（0.6s 打开），起音 0.35s
+      case 'nebula_brass': {
+        const mix: GainNode[] = [-8, 0, 8].map((det) => {
+          const o = osc('sawtooth', freq, det);
+          const g = gain(0.34);
+          o.connect(g);
+          return g;
+        });
+        const lp = throughLowpass(mix, 180, 5);
+        lp.frequency.setValueAtTime(180, t);
+        lp.frequency.exponentialRampToValueAtTime(1600, t + 0.6);
+        end = env(0.35, 2.0);
+        break;
+      }
+
+      // 7. 空灵合唱：失谐锯齿并联三母音共振峰带通（320 / 800 / 2500Hz），起音 0.6s，释放 2.6s
+      case 'ethereal_choir': {
+        const pre = gain(1);
+        [-6, 6].forEach((det) => {
+          const o = osc('sawtooth', freq, det);
+          const g = gain(0.5);
+          o.connect(g);
+          g.connect(pre);
+        });
+        const formants: [number, number, number][] = [
+          [320, 5, 1],
+          [800, 7, 0.55],
+          [2500, 9, 0.22],
+        ];
+        for (const [f, q, g] of formants) {
+          const bp = filter('bandpass', f, q);
+          const fg = gain(g);
+          pre.connect(bp);
+          bp.connect(fg);
+          fg.connect(amp);
+        }
+        end = env(0.6, 2.6);
+        break;
+      }
+
+      // 8. 脉冲琶音：锯齿 + 低八度正弦（0.5f）+ 高共振低通 3600Hz → 240Hz（0.12s）
+      case 'arp_pluck': {
+        const o = osc('sawtooth', freq);
+        const sub = osc('sine', freq * 0.5);
+        const subGain = gain(0.6);
+        sub.connect(subGain);
+        const lp = throughLowpass([o, subGain], 3600, 12);
+        lp.frequency.setValueAtTime(3600, t);
+        lp.frequency.exponentialRampToValueAtTime(240, t + 0.12);
+        end = env(0.005, 0.9);
+        break;
+      }
+    }
+
+    this.voices += 1;
+    const first = stops[0];
+    if (first) {
+      first.onended = () => {
+        this.voices = Math.max(0, this.voices - 1);
+      };
+    }
+    for (const o of stops) {
+      o.start(t);
+      o.stop(end + 0.05);
+    }
   }
 
   // ---------------------------------------------------------------- 交互音效
 
-  /** 键盘 A–L 拨弦 */
+  /** 键盘 A–L 拨弦：当前音色主音 + 一颗高八度弱音 */
   playChime(index: number, velocity = 1): void {
     if (!this.ctx || this.scale.length === 0) return;
     const n = this.scale.length;
     const degree = ((index % n) + n) % n;
     const freq = this.scale[degree];
     const t = this.ctx.currentTime;
-    this.bell(freq, 0.17 * velocity, t, ((index % 9) / 8) * 1.4 - 0.7, 2.2);
-    this.bell(freq * 2, 0.055 * velocity, t + 0.01, 0, 1.5);
+    this.playNote(freq, 0.17 * velocity, this.timbre, { when: t, pan: ((index % 9) / 8) * 1.4 - 0.7 });
+    this.playNote(freq * 2, 0.055 * velocity, this.timbre, { when: t + 0.01, pan: 0 });
   }
 
   /** 指针点击的轻柔泛音 */
   playClick(pan = 0): void {
     if (!this.ctx || this.scale.length === 0) return;
     const freq = this.scale[Math.floor(Math.random() * this.scale.length)];
-    this.bell(freq, 0.11, this.ctx.currentTime, pan, 1.9);
+    this.playNote(freq, 0.11, this.timbre, { when: this.ctx.currentTime, pan });
   }
 
   /** 鼠标悬停时触发的高频泛音（节流由调用方负责） */
   playHover(pan = 0): void {
     if (!this.ctx || this.scale.length === 0) return;
     const freq = this.scale[Math.floor(this.scale.length / 2)] * 4;
-    this.bell(freq, 0.028, this.ctx.currentTime, pan, 0.7);
+    this.playNote(freq, 0.028, this.timbre, { when: this.ctx.currentTime, pan });
   }
 
   /** 长按蓄力：音调平滑上扬（Pitch Bend） */
@@ -552,12 +824,13 @@ export class NebulaAudioEngine {
     sub.start(t);
     sub.stop(t + d + 0.1);
 
-    // Drone 避让：过渡期间压低，落定后按当前预设回位
+    // Drone 避让：过渡期间压低，落定后按当前预设回位；避让窗口内潮汐推升不介入
     if (this.drone) {
       const back = this.preset ? this.droneGainTarget(this.preset) : 0.15;
       this.drone.gain.gain.cancelScheduledValues(t);
       this.drone.gain.gain.setTargetAtTime(0.065, t, 0.16);
       this.drone.gain.gain.setTargetAtTime(back, t + d * 0.78, 0.5);
+      this.droneHoldUntil = t + d * 0.78;
     }
   }
 
@@ -568,7 +841,7 @@ export class NebulaAudioEngine {
     const n = this.scale.length;
     [0, 2, 4].forEach((deg, i) => {
       const freq = this.scale[(deg + n) % n];
-      this.bell(freq, 0.05, t + i * 0.07, (i - 1) * 0.5, 2.8);
+      this.playNote(freq, 0.05, 'crystal_bowl', { when: t + i * 0.07, pan: (i - 1) * 0.5 });
     });
   }
 
@@ -613,17 +886,17 @@ export class NebulaAudioEngine {
       const chord = [0, 2, 4, 6, 8, 12];
       chord.forEach((semi, i) => {
         const freq = this.scale[semi % this.scale.length] * (i >= 4 ? 2 : 1);
-        this.bell(freq, 0.12 * power, t + i * 0.055, (i / chord.length) * 1.4 - 0.7, 3.4);
+        this.playNote(freq, 0.12 * power, 'crystal_bowl', { when: t + i * 0.055, pan: (i / chord.length) * 1.4 - 0.7 });
       });
     }
   }
 
   // ---------------------------------------------------------------- 分析
 
-  /** 读取 FFT，返回平滑后的三段能量（0~1） */
+  /** 读取 FFT 与时域 RMS，返回平滑后的三段能量（0~1）、总音量与潮汐强度 */
   getBands(dt = 0.016): AudioBands {
     if (!this.analyser || !this.ctx || !this.freqData) {
-      return { bass: 0, mid: 0, treble: 0 };
+      return { bass: 0, mid: 0, treble: 0, level: 0, tide: 0 };
     }
     this.analyser.getByteFrequencyData(this.freqData);
     const sr = this.ctx.sampleRate;
@@ -643,10 +916,25 @@ export class NebulaAudioEngine {
     const rawMid = Math.min(1, avg(150, 2000) * 1.8);
     const rawTreble = Math.min(1, avg(2000, sr / 2) * 2.8);
 
+    // 总 RMS：时域样本偏离中值（128）的均方根。×5 后再扣掉纯 Drone 铺底的本底（≈0.32）、
+    // 以高潮段（≈0.95）为满刻度，使低潮 ≈0.1、高潮 ≈1，静音时归零
+    let rawLevel = 0;
+    if (this.timeData) {
+      this.analyser.getByteTimeDomainData(this.timeData);
+      let acc = 0;
+      for (let i = 0; i < this.timeData.length; i++) {
+        const v = (this.timeData[i] - 128) / 128;
+        acc += v * v;
+      }
+      rawLevel = Math.min(1, Math.max(0, (Math.sqrt(acc / this.timeData.length) * 5 - 0.32) / 0.63));
+    }
+
     const k = 1 - Math.exp(-Math.max(0.001, dt) * 14);
     this.bands.bass += (rawBass - this.bands.bass) * k;
     this.bands.mid += (rawMid - this.bands.mid) * k;
     this.bands.treble += (rawTreble - this.bands.treble) * k;
+    this.bands.level += (rawLevel - this.bands.level) * k;
+    this.bands.tide = this.tideAt(this.ctx.currentTime);
 
     return this.bands;
   }

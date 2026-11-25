@@ -20,6 +20,20 @@ export interface EmotionVector {
 /** 三段式渐变色：内核 → 旋臂 → 外晕 */
 export type Palette = [string, string, string];
 
+/** 程序化乐器音色（全部由 Web Audio 实时合成，零采样） */
+export type TimbreId =
+  | 'crystal_bowl'
+  | 'pluck_harp'
+  | 'cosmic_rhodes'
+  | 'vibraphone'
+  | 'synth_pad'
+  | 'nebula_brass'
+  | 'ethereal_choir'
+  | 'arp_pluck';
+
+/** 音阶切换器：preset = 跟随当前星体自带的调式，其余为全局调式库 */
+export type ScaleId = 'preset' | 'pentatonic' | 'minor' | 'dorian' | 'lydian' | 'phrygian';
+
 /** 分形态动态物理参数（对应 Shader 的 uBehavior vec4） */
 export interface ShapeBehavior {
   /** 自转速度 */
@@ -56,6 +70,8 @@ export interface NebulaPreset {
   /** 调式音程（半音） */
   scale: number[];
   scaleName: string;
+  /** 该情绪预设推荐绑定的默认音色（用户可在控制栏随时手动切换） */
+  timbre: TimbreId;
   bpm: number;
   /** 湍流强度 0~2 */
   turbulence: number;

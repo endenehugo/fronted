@@ -15,6 +15,7 @@ export const GALAXY_IDLE: NebulaPreset = {
   root: 36, // C2
   scale: [0, 3, 5, 7, 10],
   scaleName: 'C 小调五声音阶',
+  timbre: 'crystal_bowl',
   bpm: 44,
   turbulence: 0.25,
   speed: 0.3,
@@ -47,6 +48,7 @@ export const PRESETS: NebulaPreset[] = [
     root: 48, // C3
     scale: [0, 2, 4, 7, 9],
     scaleName: 'C 大调五声音阶',
+    timbre: 'vibraphone',
     bpm: 62,
     turbulence: 0.42,
     speed: 0.55,
@@ -71,6 +73,7 @@ export const PRESETS: NebulaPreset[] = [
     root: 53, // F3
     scale: [0, 2, 4, 6, 7, 9, 11],
     scaleName: 'F 利底亚调式',
+    timbre: 'nebula_brass',
     bpm: 104,
     turbulence: 1.15,
     speed: 1.55,
@@ -95,6 +98,7 @@ export const PRESETS: NebulaPreset[] = [
     root: 45, // A2
     scale: [0, 2, 3, 5, 7, 8, 10],
     scaleName: 'A 自然小调',
+    timbre: 'cosmic_rhodes',
     bpm: 54,
     turbulence: 0.7,
     speed: 0.4,
@@ -119,6 +123,7 @@ export const PRESETS: NebulaPreset[] = [
     root: 50, // D3
     scale: [0, 2, 3, 5, 7, 9, 10],
     scaleName: 'D 多利亚调式',
+    timbre: 'arp_pluck',
     bpm: 84,
     turbulence: 0.5,
     speed: 0.85,
@@ -143,6 +148,7 @@ export const PRESETS: NebulaPreset[] = [
     root: 52, // E3
     scale: [0, 1, 3, 5, 7, 8, 10],
     scaleName: 'E 弗里吉亚调式',
+    timbre: 'pluck_harp',
     bpm: 92,
     turbulence: 1.45,
     speed: 1.1,
@@ -167,6 +173,7 @@ export const PRESETS: NebulaPreset[] = [
     root: 43, // G2
     scale: [0, 2, 4, 7, 9, 11, 14],
     scaleName: 'G 大调加九音',
+    timbre: 'ethereal_choir',
     bpm: 66,
     turbulence: 0.58,
     speed: 0.62,
