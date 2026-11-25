@@ -10,6 +10,9 @@ export type PresetId =
   | 'catharsis'
   | 'healing';
 
+/** 明暗主题：dark 深空星空星云；light 水墨青绿山水明场 */
+export type ThemeMode = 'dark' | 'light';
+
 /** 情感向量：Valence 效价 / Arousal 唤醒度 / Mystery 神秘感，取值范围 [-1, 1] */
 export interface EmotionVector {
   valence: number;
@@ -91,4 +94,5 @@ export interface NebulaState {
   speed: number;
   seed: number;
   emotion: EmotionVector | null;
+  theme: ThemeMode;
 }

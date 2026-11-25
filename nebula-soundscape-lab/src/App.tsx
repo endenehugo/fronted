@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Moon, Sun } from 'lucide-react';
 import { GALAXY_IDLE, INSPIRATIONS, PRESETS, getPreset } from './visual/presets';
 import { NebulaCanvas, type NebulaCanvasHandle } from './visual/NebulaCanvas';
 import LaunchOverlay from './components/LaunchOverlay';
 import ControlDock from './components/ControlDock';
 import PostcardModal from './components/PostcardModal';
+import InkLandscape from './components/InkLandscape';
 import { NebulaAudioEngine } from './audio/NebulaAudioEngine';
 import { analyzeEmotion } from './utils/emotionParser';
 import { buildShareUrl, readStateFromHash, writeStateToHash } from './utils/urlState';
 import { downloadDataUrl, generatePostcard } from './utils/postcardGenerator';
-import type { EmotionVector, Palette, PresetId } from './types';
+import type { EmotionVector, Palette, PresetId, ThemeMode } from './types';
 
 interface Stats {
   fps: number;
@@ -35,6 +36,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [audioLive, setAudioLive] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>('dark');
 
   const canvasRef = useRef<NebulaCanvasHandle>(null);
   const audio = useMemo(() => NebulaAudioEngine.getInstance(), []);
@@ -51,6 +53,7 @@ export default function App() {
     setPalette(state.colors);
     setTurbulence(state.turbulence);
     setSpeed(state.speed);
+    setTheme(state.theme);
   }, []);
 
   // ---- 音频引擎状态指示 ----
@@ -78,10 +81,11 @@ export default function App() {
         speed,
         seed: 1,
         emotion,
+        theme,
       });
     }, 600);
     return () => window.clearTimeout(timer);
-  }, [presetId, input, palette, turbulence, speed, emotion, launched, preset.colors]);
+  }, [presetId, input, palette, turbulence, speed, emotion, launched, preset.colors, theme]);
 
   // ---- 唤醒星云：解锁音频，从奇点展开为待机大星系 ----
   const handleLaunch = useCallback(async () => {
@@ -214,6 +218,7 @@ export default function App() {
       speed,
       seed: 1,
       emotion,
+      theme,
     });
     try {
       await navigator.clipboard.writeText(url);
@@ -233,73 +238,107 @@ export default function App() {
     }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2200);
-  }, [presetId, input, palette, turbulence, speed, emotion, preset.colors]);
+  }, [presetId, input, palette, turbulence, speed, emotion, preset.colors, theme]);
 
   const handleClosePostcard = useCallback(() => setPostcard(null), []);
 
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+  }, []);
+
   return (
-    <div className="relative h-[100dvh] w-full overflow-hidden bg-black text-white">
-      {/* 星云画布 */}
-      <NebulaCanvas
-        ref={canvasRef}
-        preset={preset}
-        emotion={emotion}
-        palette={palette}
-        turbulence={turbulence}
-        speed={speed}
-        onStats={setStats}
-      />
+    <div
+      data-theme={theme}
+      className="relative h-[100dvh] w-full overflow-hidden bg-[var(--bg)] text-[var(--text)]"
+    >
+      {/* 明场：水墨青绿山水层（暗场淡出） */}
+      <div
+        className={`absolute inset-0 transition-opacity duration-700 ease-out ${
+          theme === 'light' ? 'opacity-100' : 'opacity-0'
+        }`}
+        aria-hidden={theme !== 'light'}
+      >
+        <InkLandscape />
+      </div>
+
+      {/* 暗场：星云画布（明场淡出，保留引擎实例不销毁） */}
+      <div
+        className={`absolute inset-0 transition-opacity duration-700 ease-out ${
+          theme === 'dark' ? 'opacity-100' : 'opacity-0'
+        }`}
+      >
+        <NebulaCanvas
+          ref={canvasRef}
+          preset={preset}
+          emotion={emotion}
+          palette={palette}
+          turbulence={turbulence}
+          speed={speed}
+          onStats={setStats}
+        />
+      </div>
 
       {/* 顶部信息 */}
       <header className="pointer-events-none fixed inset-x-0 top-0 z-40 flex items-start justify-between p-4 sm:p-6">
         <div className="animate-fade-in">
-          <div className="text-[9px] tracking-[0.38em] text-white/35 sm:text-[10px]">
+          <div className="text-[9px] tracking-[0.38em] text-[var(--text-faint)] sm:text-[10px]">
             NEBULA SOUNDSCAPE LAB
           </div>
           {launched && !isIdle ? (
             <button
               onClick={handleBackToGalaxy}
-              className="animate-fade-in pointer-events-auto mt-2 flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.06] px-3.5 py-1.5 text-[12px] text-white/80 backdrop-blur-xl transition-all hover:border-white/35 hover:bg-white/15 hover:text-white"
+              className="animate-fade-in pointer-events-auto mt-2 flex items-center gap-1.5 rounded-full border border-[var(--panel-border)] bg-[var(--panel)] px-3.5 py-1.5 text-[12px] text-[var(--text-dim)] backdrop-blur-xl transition-all hover:border-[var(--text-faint)] hover:bg-[var(--panel-strong)] hover:text-[var(--text-strong)]"
             >
               <ArrowLeft size={13} />
               返回大星系
             </button>
           ) : (
-            <div className="mt-1 text-[13px] text-white/85 sm:text-[14px]">{preset.name}</div>
+            <div className="mt-1 text-[13px] text-[var(--text-strong)] sm:text-[14px]">{preset.name}</div>
           )}
         </div>
-        <div className="animate-fade-in text-right" style={{ animationDelay: '150ms' }}>
-          <div className="text-[9px] tracking-[0.24em] text-white/35 sm:text-[10px]">SCALE</div>
-          <div className="mt-1 text-[11px] text-white/70 sm:text-[12px]">{preset.scaleName}</div>
-          {stats && (
-            <div className="mt-1 font-mono text-[9px] tracking-wider text-white/25 sm:text-[10px]">
-              {stats.count.toLocaleString()} PARTICLES · {stats.fps} FPS
-            </div>
-          )}
-          {launched && (
-            <div className="mt-0.5 flex items-center justify-end gap-1.5 font-mono text-[9px] tracking-wider text-white/30">
-              <span
-                className={`h-1 w-1 rounded-full ${audioLive ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-white/25'}`}
-              />
-              AUDIO {audioLive ? 'LIVE' : 'OFF'}
-            </div>
-          )}
+        <div className="animate-fade-in flex items-start gap-2 text-right" style={{ animationDelay: '150ms' }}>
+          <div>
+            <div className="text-[9px] tracking-[0.24em] text-[var(--text-faint)] sm:text-[10px]">SCALE</div>
+            <div className="mt-1 text-[11px] text-[var(--text-dim)] sm:text-[12px]">{preset.scaleName}</div>
+            {stats && (
+              <div className="mt-1 font-mono text-[9px] tracking-wider text-[var(--text-faint)] sm:text-[10px]">
+                {stats.count.toLocaleString()} PARTICLES · {stats.fps} FPS
+              </div>
+            )}
+            {launched && (
+              <div className="mt-0.5 flex items-center justify-end gap-1.5 font-mono text-[9px] tracking-wider text-[var(--text-faint)]">
+                <span
+                  className={`h-1 w-1 rounded-full ${audioLive ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-[var(--text-faint)]'}`}
+                />
+                AUDIO {audioLive ? 'LIVE' : 'OFF'}
+              </div>
+            )}
+          </div>
+          {/* 明暗主题切换 */}
+          <button
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? '切换到水墨明场' : '切换到星空暗场'}
+            title={theme === 'dark' ? '水墨明场' : '星空暗场'}
+            className="pointer-events-auto mt-0.5 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--panel-border)] bg-[var(--panel)] text-[var(--text-dim)] backdrop-blur-xl transition-all hover:border-[var(--text-faint)] hover:text-[var(--text-strong)]"
+          >
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
         </div>
       </header>
 
       {/* 待机态：极简标题与副标题 */}
       {launched && isIdle && (
         <div className="pointer-events-none fixed inset-x-0 top-[14%] z-30 flex flex-col items-center px-6 text-center">
-          <div className="animate-fade-in text-[9px] tracking-[0.5em] text-white/30 sm:text-[10px]">
+          <div className="animate-fade-in text-[9px] tracking-[0.5em] text-[var(--text-faint)] sm:text-[10px]">
             MESSIER 31 · ANDROMEDA
           </div>
           <h1
             key="hero"
-            className="animate-fade-up mt-3 text-[clamp(18px,2.6vw,28px)] font-light leading-snug tracking-[0.12em] text-white/90 [animation-delay:120ms]"
+            className="font-title animate-fade-up mt-3 text-[clamp(18px,2.6vw,28px)] font-light leading-snug tracking-[0.12em] text-[var(--text-strong)] [animation-delay:120ms]"
           >
             在群星之间写下此刻的心绪
           </h1>
-          <p className="animate-fade-up mt-2 text-[12px] tracking-[0.08em] text-white/40 [animation-delay:240ms]">
+          <p className="animate-fade-up mt-2 text-[12px] tracking-[0.08em] text-[var(--text-faint)] [animation-delay:240ms]">
             输入任意心情，回车潜入属于它的星云
           </p>
         </div>
@@ -308,8 +347,8 @@ export default function App() {
       {/* 星云观测日志 */}
       {log && (
         <div key={log} className="pointer-events-none fixed inset-x-0 top-[84px] z-40 flex justify-center px-4">
-          <div className="animate-fade-up max-w-xl rounded-2xl border border-white/10 bg-black/25 px-5 py-2.5 text-center text-[12px] leading-6 text-white/70 backdrop-blur-md sm:text-[12.5px]">
-            <span className="mr-1.5 text-white/35">观测日志</span>
+          <div className="animate-fade-up max-w-xl rounded-2xl border border-[var(--panel-border)] bg-[var(--panel)] px-5 py-2.5 text-center text-[12px] leading-6 text-[var(--text-dim)] backdrop-blur-md sm:text-[12.5px]">
+            <span className="mr-1.5 text-[var(--text-faint)]">观测日志</span>
             {log}
           </div>
         </div>
@@ -319,6 +358,7 @@ export default function App() {
       {launched && (
         <ControlDock
           mode={isIdle ? 'idle' : 'body'}
+          theme={theme}
           preset={preset}
           inspirations={INSPIRATIONS}
           presets={PRESETS}
@@ -353,7 +393,7 @@ export default function App() {
       )}
 
       {/* 启动遮罩 */}
-      {!launched && <LaunchOverlay preset={preset} onLaunch={handleLaunch} fading={ignited} />}
+      {!launched && <LaunchOverlay preset={preset} theme={theme} onLaunch={handleLaunch} fading={ignited} />}
     </div>
   );
 }
