@@ -12,6 +12,8 @@ export interface PostcardOptions {
   palette: Palette;
   spectrum: number[];
   timestamp: number;
+  /** 当前生效的调式名（用户可能把音阶切成调式库里的其它调式，不能再用 preset.scaleName） */
+  scaleName?: string;
 }
 
 const W = 1080;
@@ -71,22 +73,27 @@ function wrapText(
 ): string[] {
   const lines: string[] = [];
   let current = '';
+  let truncated = false;
   for (const ch of Array.from(text)) {
     const test = current + ch;
     if (ctx.measureText(test).width > maxWidth && current) {
       lines.push(current);
       current = ch;
-      if (lines.length >= maxLines) break;
+      if (lines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
     } else {
       current = test;
     }
   }
-  if (lines.length < maxLines && current) lines.push(current);
-  if (lines.length === maxLines) {
-    const last = lines[maxLines - 1];
-    if (ctx.measureText(last).width > maxWidth) {
-      lines[maxLines - 1] = `${last.slice(0, Math.max(0, last.length - 2))}…`;
-    }
+  if (!truncated && lines.length < maxLines && current) lines.push(current);
+  // 超出最大行数时补省略号：原来直接 break，后面的文字连省略号都没有，读者会以为句子就这样结束了
+  if (truncated && lines.length > 0) {
+    const i = lines.length - 1;
+    const last = lines[i];
+    // 去掉最后一个字再补省略号，避免加完超出 maxWidth
+    lines[i] = `${last.length > 1 ? last.slice(0, -1) : last}…`;
   }
   return lines;
 }
@@ -144,6 +151,22 @@ export async function generatePostcard(opts: PostcardOptions): Promise<string> {
   fadeBottom.addColorStop(1, 'rgba(0,0,0,0.6)');
   ctx.fillStyle = fadeBottom;
   ctx.fillRect(area.x, area.y + area.h - 200, area.w, 200);
+
+  // 与屏幕一致的四角压暗：网页上有一层 CSS 暗角，截图截不到它，
+  // 之前卡片里的星云因此比屏幕上亮一圈。这里在星云区域内补同一效果的径向暗角。
+  const vig = ctx.createRadialGradient(
+    area.x + area.w * 0.5,
+    area.y + area.h * 0.46,
+    area.w * 0.12,
+    area.x + area.w * 0.5,
+    area.y + area.h * 0.46,
+    area.w * 0.62,
+  );
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(0.62, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(area.x, area.y, area.w, area.h);
   ctx.restore();
 
   roundRectPath(ctx, area.x, area.y, area.w, area.h, 30);
@@ -221,7 +244,7 @@ export async function generatePostcard(opts: PostcardOptions): Promise<string> {
   ctx.font = '400 24px "PingFang SC", "Microsoft YaHei", sans-serif';
   ctx.fillStyle = opts.palette[1];
   ctx.globalAlpha = 0.95;
-  ctx.fillText(`音阶 · ${opts.preset.scaleName}`, card.x + padX, card.y + card.h - 148);
+  ctx.fillText(`音阶 · ${opts.scaleName ?? opts.preset.scaleName}`, card.x + padX, card.y + card.h - 148);
   ctx.globalAlpha = 1;
 
   // ---------- 频谱 ----------

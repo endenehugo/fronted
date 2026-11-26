@@ -250,7 +250,7 @@ export default function ControlDock(props: Props) {
   };
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center px-3 pb-3 sm:px-5 sm:pb-5">
+    <div className="pointer-events-none flex justify-center px-3 pb-3 sm:px-5 sm:pb-5">
       <div className="pointer-events-auto w-full max-w-[1080px] rounded-3xl border border-white/[0.12] bg-white/[0.055] p-2.5 shadow-[0_24px_70px_-24px_rgba(0,0,0,0.95)] backdrop-blur-2xl">
         {/* 星体态：天文观测名称 · 诗意解读 · 音阶演奏提示 · 定格明信片 */}
         {!idle && (

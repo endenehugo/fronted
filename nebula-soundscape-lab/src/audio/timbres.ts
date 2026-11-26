@@ -17,11 +17,3 @@ export const TIMBRE_LIST: TimbreDef[] = [
   { id: 'ethereal_choir', name: '空灵合唱', recipe: '失谐锯齿 · 三母音共振峰' },
   { id: 'arp_pluck', name: '脉冲琶音', recipe: '锯齿 + 低八度正弦 · 高共振低通' },
 ];
-
-export const TIMBRE_MAP: Record<TimbreId, TimbreDef> = TIMBRE_LIST.reduce(
-  (acc, t) => {
-    acc[t.id] = t;
-    return acc;
-  },
-  {} as Record<TimbreId, TimbreDef>,
-);

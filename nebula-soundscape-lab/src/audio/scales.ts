@@ -52,11 +52,6 @@ export const SCALE_MAP: Record<Exclude<ScaleId, 'preset'>, ScaleDef> = SCALE_LIB
   {} as Record<Exclude<ScaleId, 'preset'>, ScaleDef>,
 );
 
-/** 由基准 MIDI 音符 + 调式构建跨 octaves 个八度的频率表 */
-export function buildScaleFromKey(keyMidi: number, scaleId: Exclude<ScaleId, 'preset'>, octaves = 2): number[] {
-  return buildScale(keyMidi, SCALE_MAP[scaleId].intervals, octaves);
-}
-
 /**
  * 交互旋律音阶：比主音高两个八度，清亮不刺耳。
  * scaleId = 'preset' 时沿用星体自带调式，否则以星体主音为根套用全局调式库。
@@ -72,9 +67,6 @@ export function scaleDisplayName(preset: NebulaPreset, scaleId: ScaleId = 'prese
   const root = freqToNoteName(midiToFreq(preset.root)).replace(/-?\d+$/, '');
   return `${root} ${SCALE_MAP[scaleId].name}`;
 }
-
-/** 超新星爆发使用的和弦音级（以音阶下标表示） */
-export const SUPERNOVA_CHORD = [0, 2, 4, 6, 8, 12];
 
 /** 键盘 A–L 九个键对应的音阶下标 */
 export const KEY_DEGREES = [0, 2, 4, 5, 7, 9, 11, 12, 14];

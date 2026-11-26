@@ -13,12 +13,6 @@ const TAU = Math.PI * 2;
 
 const gauss = (): number => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
 
-/** 0~1 的三次平滑阶跃，用来做软过渡 / 压暗包络 */
-const smooth01 = (t: number): number => {
-  const x = t < 0 ? 0 : t > 1 ? 1 : t;
-  return x * x * (3 - 2 * x);
-};
-
 export interface ShapeAttributes {
   /** 当前形态坐标 */
   position: Float32Array;
@@ -458,21 +452,23 @@ const mix3 = (
   a[2] + (b[2] - a[2]) * t,
 ];
 
-const GALAXY_R = 4.0; // 星云外缘
-const GALAXY_SCALE_LEN = 2.05; // 面亮度标长
+const GALAXY_R = 5.2; // 星云外缘（原 4.0：整体放大 30%，盘面才铺得开）
+const GALAXY_SCALE_LEN = 2.45; // 面亮度标长（原 2.05：放大后同步拉长，盘面不至于边缘骤断）
 const GALAXY_ARM_K = 2.25; // 六条悬臂的对数螺旋松紧
 const GALAXY_ARM0 = 0.55; // 悬臂起始半径
 
 const GALAXY_CORE_A = rgb('#FFFDF5');
 const GALAXY_CORE_B = rgb('#F4D09A');
-const CLOUD_WARM = rgb('#FFF4E2');
-const CLOUD_MID = rgb('#D4DEFF');
+// 盘面色板：中间调刻意往蓝紫压、暖端往琥珀压 —— 原来的 #D4DEFF / #FFF4E2
+// 在加色混合下会互相叠成一片近白，是"白雾"的颜色来源
+const CLOUD_WARM = rgb('#FBE7C8');
+const CLOUD_MID = rgb('#A9BCF0');
 const CLOUD_COOL = rgb('#7488E8');
 
 /** 六条悬臂，一条对应一种情绪 */
 const ARM_COUNT = 6;
 const ARM_R_IN = 0.7;
-const ARM_R_OUT = 3.95;
+const ARM_R_OUT = 5.05;
 
 const NEST_ORDER: PresetId[] = [
   'serenity',
@@ -520,14 +516,6 @@ const nestPalette = (id: PresetId): [number, number, number][] => {
   return [rgb(p.colors[0]), rgb(p.colors[1]), rgb(p.colors[2])];
 };
 
-const grad3 = (
-  pal: [number, number, number][],
-  t: number,
-): [number, number, number] => {
-  const u = Math.min(1, Math.max(0, t));
-  return u < 0.5 ? mix3(pal[0], pal[1], u * 2) : mix3(pal[1], pal[2], (u - 0.5) * 2);
-};
-
 const scale3 = (
   c: [number, number, number],
   k: number,
@@ -536,13 +524,15 @@ const scale3 = (
 const buildGalaxy: Builder = (count) => {
   const s = alloc(count);
 
-  const nCore = Math.floor(count * 0.05);
+  // 粒子预算（按百分比）：
+  //   核 7.5% / 六臂 28% / 连续盘 46% / 星巢 10% / 雾桥 4.5% / 柔光 余量(≈4%)
+  // 原来连续盘那 46% 是"一整片填满的白色星云带"，结构为零、颜色发白 —— 白雾的主要来源。
+  const nCore = Math.floor(count * 0.075);
   const nArms = Math.floor(count * 0.28);
-  const nFog = Math.floor(count * 0.035);
-  const nNest = Math.floor(count * 0.12);
-  const nLink = Math.floor(count * 0.05);
-  const nBand = Math.floor(count * 0.11);
-  const nCloud = count - nCore - nArms - nFog - nNest - nLink - nBand;
+  const nField = Math.floor(count * 0.46);
+  const nNest = Math.floor(count * 0.1);
+  const nLink = Math.floor(count * 0.045);
+  const nFog = count - nCore - nArms - nField - nNest - nLink;
   const perArm = Math.floor(nArms / ARM_COUNT);
 
   const write = (
@@ -598,49 +588,69 @@ const buildGalaxy: Builder = (count) => {
     );
   }
 
-  // ---- 星云主体：一整片填满的白色星云带，没有旋臂结构，
-  //      只靠角向低频扰动长出一层层的丝絮，避免糊成一团均匀的白。
-  for (let k = 0; k < nCloud; k++, i++) {
-    const r = 0.32 + 3.55 * Math.pow(Math.random(), 0.62);
-    const t = Math.min(1, r / GALAXY_R);
-    const ang = Math.random() * TAU;
-    const thick = 0.05 + 0.26 * (1 - t * 0.7);
+  // ---- 连续盘：指数盘 + 六重对数螺旋密度波 + 尘埃缺带。
+  //      "银河感"的关键在这一层：粒子铺满整个盘面（不再只挂在六条臂上），
+  //      密度顺着与旋臂同族的对数螺旋相位起伏，于是旋臂是"从盘里长出来"的，
+  //      而不是六根辐条；再用一条与臂错开相位的窄带做密度缺口当尘埃暗带
+  //      （加色混合无法遮挡光线，只能靠"缺粒子"看起来暗）。
+  {
+    let k = 0;
+    let guard = 0;
+    while (k < nField && guard < nField * 12) {
+      guard++;
+      const r = 0.32 + (GALAXY_R - 0.45) * Math.pow(Math.random(), 0.55);
+      const t = Math.min(1, r / GALAXY_R);
+      const ang = Math.random() * TAU;
+      // 与 armAngleAt 同相位族：臂脊上 phase = 2πi
+      const phase = ARM_COUNT * (ang - GALAXY_ARM_K * Math.log(r / GALAXY_ARM0));
+      const armMod = 0.5 + 0.5 * Math.cos(phase); // 1 = 臂脊，0 = 臂间
+      // 臂间仍保留 42% 的盘粒子，臂上更密 —— 这样才有连续盘而不是辐条
+      if (Math.random() > 0.42 + 0.58 * armMod) continue;
+      // 尘埃带：相位错开 0.9 rad（臂内侧），窄带内剔除 85% 粒子
+      const dustMod = 0.5 + 0.5 * Math.cos(phase - 0.9);
+      if (dustMod > 0.93 && Math.random() < 0.85) continue;
 
-    // 丝絮：两段不同频率的角向调制 + 径向起伏
-    const fil =
-      Math.sin(ang * 3.0 + r * 4.2) * 0.5 + Math.sin(ang * 7.0 - r * 2.4 + 1.7) * 0.30;
+      const dens = Math.exp(-r / GALAXY_SCALE_LEN);
+      const warm = Math.exp(-r / 1.25);
+      // 内圈偏暖白、外圈偏冷蓝；中间调刻意压暗，避免又变成"一片白雾"
+      const base = mix3(
+        mix3(CLOUD_COOL, CLOUD_MID, 0.3 + 0.45 * (1 - t)),
+        CLOUD_WARM,
+        warm * 0.55,
+      );
+      const bright = (0.3 + 0.3 * armMod) * (0.45 + 1.0 * dens) * 0.5;
 
-    const dens = Math.exp(-r / GALAXY_SCALE_LEN);
-    const bright = (0.20 + 0.34 * fil) * (0.35 + 1.05 * dens) * 0.62;
-    const warm = Math.exp(-r / 1.15);
-
-    write(
-      i,
-      [
-        Math.cos(ang) * r + gauss() * 0.035,
-        gauss() * thick,
-        Math.sin(ang) * r + gauss() * 0.035,
-      ],
-      0.42 + Math.random() * 0.62,
-      scale3(mix3(mix3(CLOUD_COOL, CLOUD_MID, 0.55), CLOUD_WARM, warm), Math.max(0.18, bright)),
-      0.12 + 0.2 * t,
-      0.06,
-      Math.random(),
-      0,
-    );
+      write(
+        i,
+        [
+          Math.cos(ang) * r + gauss() * 0.045,
+          gauss() * (0.04 + 0.13 * (1 - t)),
+          Math.sin(ang) * r + gauss() * 0.045,
+        ],
+        0.34 + Math.random() * 0.48,
+        scale3(base, Math.max(0.12, bright)),
+        0.14 + 0.26 * t,
+        0.05,
+        Math.random(),
+        0, // 盘粒子不属于任何悬臂，不跟着臂摆动
+      );
+      i++;
+      k++;
+    }
   }
 
-  // ---- 大颗粒柔光：把点云之间的缝补上，让星云带看起来是连续的
+  // 柔光：粒子数已从 3.5% 降到约 4% 预算里的剩余部分，仍压到最低——
+  // 它只是补点云之间的缝，给多了就是雾。透明度也一并压低。
   for (let k = 0; k < nFog; k++, i++) {
-    const r = 0.4 + 3.35 * Math.random();
+    const r = 0.4 + (GALAXY_R - 0.5) * Math.random();
     const t = Math.min(1, r / GALAXY_R);
     const ang = Math.random() * TAU;
     const warm = Math.exp(-r / 1.3);
     write(
       i,
       [Math.cos(ang) * r, gauss() * (0.08 + 0.14 * (1 - t)), Math.sin(ang) * r],
-      1.15 + Math.random() * 0.9,
-      scale3(mix3(CLOUD_COOL, CLOUD_WARM, warm), 0.035 + Math.random() * 0.025),
+      1.05 + Math.random() * 0.8,
+      scale3(mix3(CLOUD_COOL, CLOUD_WARM, warm), 0.022 + Math.random() * 0.018),
       0.15,
       0.02,
       Math.random(),
@@ -648,33 +658,7 @@ const buildGalaxy: Builder = (count) => {
     );
   }
 
-  // ---- 白色环带：绕中心整整一圈的白色星云圆环，六条彩臂从中穿过，
-//      环的内外边缘做柔化，靠近臂的位置略微加浓，看起来像一条缠绕星系的白色带子。
-  for (let k = 0; k < nBand; k++, i++) {
-    const ang = Math.random() * TAU;
-    const rr = 1.9 + Math.random() * 1.1;
-    const tn = rr / GALAXY_R;
-    const edge = smooth01((rr - 1.6) / 0.42) * (1 - smooth01((rr - 2.86) / 0.42));
-    // 角向轻微起伏，避免看起来像画上去的几何圆
-    const ripple = 0.82 + 0.18 * Math.sin(ang * 5 + 1.3) + 0.08 * Math.sin(ang * 11 + 2.1);
-    const bright = (0.42 + 0.95 * edge) * ripple * (0.72 + Math.random() * 0.45);
-    write(
-      i,
-      [
-        Math.cos(ang) * rr,
-        gauss() * (0.03 + 0.06 * (1 - tn)),
-        Math.sin(ang) * rr,
-      ],
-      0.58 + Math.random() * 0.85,
-      scale3(mix3(CLOUD_WARM, [1, 1, 1], 0.55), 0.16 + bright * 0.4),
-      0.18,
-      0.06,
-      Math.random(),
-      0,
-    );
-  }
-
-  // ---- 六颗情绪星云：紧实的发光团，落在自己那条悬臂的随机位置上，随悬臂同步自转
+  // ---- 六颗情绪星云：紧实的发光团，落在自己那条悬臂的随机位置上，随悬臂一起差速自转
   {
     const perNest = Math.floor(nNest / ARM_COUNT);
     for (let a = 0; a < ARM_COUNT; a++) {
@@ -727,7 +711,7 @@ const buildGalaxy: Builder = (count) => {
     );
   }
 
-  // ---- 六条悬臂：每条单独一色，六条臂整体同步自转
+  // ---- 六条悬臂：每条单独一色、单独转速（aArm 驱动的差速自转）
   for (let a = 0; a < ARM_COUNT; a++) {
     const pal = nestPalette(NEST_ORDER[a]);
     const per = Math.min(perArm, count - i);

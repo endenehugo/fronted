@@ -17,7 +17,6 @@ import {
   nebulaVertexShader,
   starfieldFragmentShader,
   starfieldVertexShader,
-  FilmShader,
   VignetteShader,
 } from './nebulaShaders';
 import { createGalaxyTexture } from './galaxyTexture';
@@ -443,9 +442,6 @@ const ENERGY_DAMP_FALL = 1.7;
 /** 音频未就绪时的包络基线：画面保持中低位的静息呼吸，而非压到最暗 */
 const ENERGY_IDLE = 0.35;
 
-/** 形态缓存上限：一套 6 万粒子的属性数组约 4MB，7 个形态 × 两种粒子数会把内存吃穿 */
-const SHAPE_CACHE_LIMIT = 4;
-
 /**
  * 自转角速度的潮汐因子：ω = spin × (SPIN_BASE + energy × SPIN_ENERGY + mid × SPIN_MID)。
  * 待机包络 0.35 时约 0.49，潮汐高潮约 0.95 → 高低潮之间约 2 倍速差，整体保持缓慢漂移。
@@ -459,16 +455,11 @@ const BLOOM_KICK = 0.15;
 const BLOOM_KICK_MAX = 0.3;
 
 /**
- * ACES 色彩管线总开关。
- * 这段是 ba68d3d 引入、在合并提交 048f99c 里被整段吞掉的实现：
- * 加色混合的粒子是真正的高动态范围画面，没有 tonemap 时高光直接剪成纯白、
- * 中间调挤在暗部；缺 OutputPass 时 composer 里的线性色值还会被当 sRGB 直接上屏。
+ * 全局曝光总开关（配合 ACESFilmicToneMapping + OutputPass）。
+ * 有 sRGB 编码之后整条链路才"正确"，提亮/压暗只改这一个数：
+ *   1.0 = 中性；1.15 偏亮；0.85 偏暗。改完刷新即可看到。
  */
-const ACES_ENABLED = true;
-/** 全局曝光总开关：ACES 之后中间调的亮度基本由它决定，调这一个数即可整体提亮/压暗 */
 const EXPOSURE = 1.0;
-/** 胶片层（颗粒 + 色差 + 冲击波推挤）：必须排在 OutputPass 之后，作用在最终显示值上 */
-const FILM_ENABLED = true;
 
 /** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
 const smoothstep01 = (e0: number, e1: number, x: number): number => {
@@ -514,7 +505,7 @@ class NebulaEngine {
   private composer: EffectComposer;
   private bloom: UnrealBloomPass;
   private vignette: ShaderPass;
-  private film: ShaderPass | null = null;
+  private outputPass: OutputPass;
   private points: THREE.Points;
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
@@ -551,7 +542,6 @@ class NebulaEngine {
   private raycaster = new THREE.Raycaster();
 
   private preset: NebulaPreset;
-  private emotion: EmotionVector | null;
   private shapeId: PresetId;
 
   private raf = 0;
@@ -624,7 +614,8 @@ class NebulaEngine {
   private velTheta = 0;
   private velPhi = 0;
 
-  // 潜入运镜：目标星巢的世界坐标（自转角统一用 spinPhase，与着色器共用同一基准）
+  // 潜入运镜：盘面累计自转角 + 目标星巢的世界坐标
+  private spinAngle = 0;
   private focusTarget = new THREE.Vector3();
   private focusCurrent = new THREE.Vector3();
   /** 悬臂取景锚点（未旋转坐标）；null 表示回到原点取景 */
@@ -672,7 +663,6 @@ class NebulaEngine {
   ) {
     this.container = container;
     this.preset = preset;
-    this.emotion = emotion;
     this.onStats = onStats;
     this.starchart = starchart;
     this.onToggleStarchart = onToggleStarchart;
@@ -689,10 +679,11 @@ class NebulaEngine {
       preserveDrawingBuffer: true, // 明信片导出必需
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    if (ACES_ENABLED) {
-      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      this.renderer.toneMappingExposure = EXPOSURE;
-    }
+    // 粒子是加色混合的高动态范围画面：不做色调映射时高光直接剪白、中间调压在暗部。
+    // 曝光取 1.0（中性）—— 之前 1.35 是给"没有 OutputPass"那套配色用的，现在有了
+    // sRGB 编码，再开 1.35 会过曝；需要整体提亮/压暗就只改这一个数。
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = EXPOSURE;
     this.renderer.setSize(w, h);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.domElement.style.width = '100%';
@@ -750,7 +741,7 @@ class NebulaEngine {
     });
 
     const shape = this.shapeFor(preset.id, this.count);
-    this.points = new THREE.Points(this.buildGeometry(this.count, shape), this.material);
+    this.points = new THREE.Points(this.buildGeometry(shape), this.material);
     this.points.frustumCulled = false;
     this.scene.add(this.points);
 
@@ -813,25 +804,21 @@ class NebulaEngine {
     this.buildCloud();
 
     this.composer = new EffectComposer(this.renderer);
+    // 后处理链缓冲按设备像素分配：只传 CSS 尺寸时，DPR>1 的屏幕上 bloom 跑在半分辨率，
+    // 亮星被低分辨率辉光放大回来就是一块块方块马赛克
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.6, 0.28, 0.72);
     this.composer.addPass(this.bloom);
     this.vignette = new ShaderPass(VignetteShader);
     this.vignette.uniforms.uAspect.value = w / h;
     this.composer.addPass(this.vignette);
-    // 色彩管线终点：ACES 色调映射 + sRGB 编码。缺这一步，composer 里的线性色值会被当成
-    // sRGB 直接上屏 —— 设计稿里的配色显示不出来、暗部更暗、亮部剪白。
-    if (ACES_ENABLED) this.composer.addPass(new OutputPass());
-    // 胶片层放在 OutputPass 之后：颗粒与色差作用在最终显示值上，暗部不再被撒噪
-    if (FILM_ENABLED) {
-      this.film = new ShaderPass(FilmShader);
-      this.film.uniforms.uAspect.value = w / h;
-      this.composer.addPass(this.film);
-    }
-
-    // 后处理链的缓冲按设备像素初始化（与 onResize 保持一致）
-    this.composer.setPixelRatio(this.renderer.getPixelRatio());
-    this.composer.setSize(w, h);
+    // OutputPass 负责「线性 → sRGB 编码 + 色调映射」：
+    // 少了它，合成器会把线性值直接写进 sRGB framebuffer —— 整体暗一档、
+    // 中间调挤在暗部、高光剪成纯白。这就是「画面发灰发暗」的另一半原因
+    // （另一半是网页那层 CSS 压角，见 App.tsx）。
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.outputPass);
 
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
@@ -1153,19 +1140,9 @@ class NebulaEngine {
   private shapeFor(id: PresetId, count: number): ShapeAttributes {
     const key = `${id}:${count}`;
     const hit = this.shapeCache.get(key);
-    if (hit) {
-      // 命中即当作最近使用：挪到队尾，淘汰时从最早的开始
-      this.shapeCache.delete(key);
-      this.shapeCache.set(key, hit);
-      return hit;
-    }
+    if (hit) return hit;
     const made = buildShape(id, count);
     this.shapeCache.set(key, made);
-    while (this.shapeCache.size > SHAPE_CACHE_LIMIT) {
-      const oldest = this.shapeCache.keys().next().value;
-      if (oldest === undefined) break;
-      this.shapeCache.delete(oldest);
-    }
     return made;
   }
 
@@ -1174,6 +1151,8 @@ class NebulaEngine {
    * 这样第一次切到某个星体也不会在形变起手那一帧卡住。
    */
   private warmShapes(): void {
+    // 移动端主线程与内存都紧张（7 套 20000 形态也要 ~7MB），不值得为省下 30ms 的首次切换去预热
+    if (isMobileDevice()) return;
     const ids: PresetId[] = [
       'galaxy_idle',
       'serenity',
@@ -1196,11 +1175,11 @@ class NebulaEngine {
       i += 1;
       if (i < ids.length) schedule(step);
     };
-    // 推迟到入场动画之后才开始预热，避免和首屏的奇点展开 / 首帧编译抢主线程
-    window.setTimeout(() => schedule(step), 1600);
+    // 等入场动画（奇点展开 ~2s）彻底结束再开始，别和首屏抢主线程
+    window.setTimeout(() => schedule(step), 4000);
   }
 
-  private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
+  private buildGeometry(shape: ShapeAttributes): THREE.BufferGeometry {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(shape.position.slice(), 3));
     geo.setAttribute('aTargetPosition', new THREE.BufferAttribute(shape.position.slice(), 3));
@@ -1223,13 +1202,13 @@ class NebulaEngine {
 
   private applyCount(n: number): void {
     this.count = n;
-    // 降级换成新的粒子数后，旧 count 的缓存再也打不到，直接丢掉，
-    // 否则 60000 与 14000 两套快照会同时驻留，正是要省的内存。
+    // 换了粒子数之后，旧数量的形态缓存就没用了（60000 的 7 套约 22MB）：
+    // 不释放的话，低帧率降级反而让内存更高
     for (const key of Array.from(this.shapeCache.keys())) {
       if (!key.endsWith(`:${n}`)) this.shapeCache.delete(key);
     }
     const shape = this.shapeFor(this.shapeId, n);
-    const geo = this.buildGeometry(n, shape);
+    const geo = this.buildGeometry(shape);
     this.points.geometry.dispose();
     this.points.geometry = geo;
     if (this.morphArmTarget) {
@@ -1248,11 +1227,20 @@ class NebulaEngine {
     this.uniforms.uTransitionSwirl.value = 0;
   }
 
-  /** 悬臂锚点在当前时刻的位置（与着色器里的同步自转公式一致） */
-  private focusCurrentFromArm(_unused: number): THREE.Vector3 {
+  /**
+   * 悬臂锚点在当前时刻的位置（与着色器里的自转 / 差速 / armFade 公式一致）。
+   * 注意必须带上 armFade：着色器里形变推进到 22% 后悬臂自转已经归零，
+   * CPU 侧若继续按 uTime 转，形变后半段 lookAt 的锚点会一直漂，镜头看着像被甩了一下。
+   */
+  private focusCurrentFromArm(): THREE.Vector3 {
     const base = this.focusBase;
     if (!base) return new THREE.Vector3();
-    const a = this.spinPhase + 0.011 * this.uniforms.uTime.value;
+    const armFade = 1 - smoothstep01(0.0, 0.22, this.morphProgress);
+    // 与着色器 2.1b 一致：有界摆动（不再把 uTime 乘进角度，否则锚点会随时间漂走）
+    const armPhase0 = (this.focusArm + 1) * 1.1;
+    const armSway =
+      (Math.sin(this.uniforms.uTime.value * 0.06 + armPhase0) - Math.sin(armPhase0)) * 0.22;
+    const a = this.spinAngle + armSway * armFade;
     return new THREE.Vector3(
       base[0] * Math.cos(a) - base[2] * Math.sin(a),
       base[1],
@@ -1379,17 +1367,29 @@ class NebulaEngine {
     this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
     this.uniforms.uTransitionSwirl.value = 0;
+
+    // 悬臂编号也必须落定：着色器里 armFade = 1 - smoothstep(0, 0.22, uMorphProgress)，
+    // 形变一结束 uMorphProgress 回到 0，armFade 又变回 1，于是残留的 aArm（待机星系的 1~6）
+    // 会继续按 `t * armId * 0.011` 逐粒子扭转新形态 —— 从待机星系点进情绪星体时形状是歪的，
+    // 而刷新走「直接初始化」路径 aArm 全为 0，所以只有刷新后才正常。
+    if (this.morphArmTarget) {
+      const armAttr = geo.getAttribute('aArm') as THREE.BufferAttribute | undefined;
+      if (armAttr && this.morphArmTarget.length === armAttr.count) {
+        (armAttr.array as Float32Array).set(this.morphArmTarget);
+        armAttr.needsUpdate = true;
+      }
+      this.morphArmTarget = null;
+    }
     // 声画同步：形变落定时给一记轻柔和弦确认音
     this.audio.arrive();
   }
 
   // -------------------------------------------------------------- 预设
 
-  applyPreset(preset: NebulaPreset, emotion: EmotionVector | null, immediate = false): void {
+  applyPreset(preset: NebulaPreset, _emotion: EmotionVector | null, immediate = false): void {
     const shapeChanged = preset.id !== this.shapeId;
     const wasIdle = this.shapeId === 'galaxy_idle';
     this.preset = preset;
-    this.emotion = emotion;
     this.shapeId = preset.id;
 
     // 基底色 = 预设自带调色板；滑块只在其上做色相偏移（所以切星体时滑块位置不需要重置）
@@ -1398,8 +1398,10 @@ class NebulaEngine {
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
-    this.glowTarget = preset.id === 'galaxy_idle' ? 0.13 : 0;
-    this.surfaceTarget = preset.id === 'galaxy_idle' ? 0.16 : 0;
+    // 待机星系的弥散辉光/盘面底纹：原来 0.13 / 0.16，是"白色雾状"的第二个来源，
+    // 盘面放大后更明显，压到 0.05 / 0.09，只做极淡的底衬
+    this.glowTarget = preset.id === 'galaxy_idle' ? 0.05 : 0;
+    this.surfaceTarget = preset.id === 'galaxy_idle' ? 0.09 : 0;
     // 待机 M31 是盘状星系（暗尘埃带靠"极暗粒子"形成），铺一层云气会糊掉暗带；只给情绪星体云气
     this.cloudTarget = preset.id === 'galaxy_idle' ? 0 : 1;
     // Bloom 能量涌动：只上浮当前值，目标值不动，随后指数回落到预设值
@@ -1423,7 +1425,7 @@ class NebulaEngine {
     if (nest) {
       this.focusBase = [nest.center[0], nest.center[1], nest.center[2]];
       this.focusArm = nest.arm;
-      this.focusTarget.copy(this.focusCurrentFromArm(0));
+      this.focusTarget.copy(this.focusCurrentFromArm());
       this.focusCurrent.copy(this.focusTarget);
     } else {
       this.focusBase = null;
@@ -1555,12 +1557,11 @@ class NebulaEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
-    // composer 的内部缓冲要按设备像素算：只传 CSS 尺寸时，DPR>1 的屏幕上整条后处理链
-    // 都跑在半分辨率上，亮星经过低分辨率 bloom 再放大回来就是一块方块马赛克
+    // composer 内部缓冲按「CSS 尺寸 × devicePixelRatio」分配；bloom 的尺寸由 composer
+    // 按 pixelRatio 逐个 pass 转发，不能再单独按 CSS 尺寸 setSize（那会把辉光降成半分辨率）
     this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(w, h);
     this.vignette.uniforms.uAspect.value = w / h;
-    if (this.film) this.film.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
     this.uniforms.uViewHeight.value = h;
     if (this.constellationMaterial) {
@@ -1577,7 +1578,7 @@ class NebulaEngine {
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     this.userCam = true;
-    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 6.6, 10.2);
+    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 6.6, 13.0);
     this.camDistTarget = this.camDist;
   };
 
@@ -1794,7 +1795,8 @@ class NebulaEngine {
     this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
-    
+    // 盘面累计自转角：与着色器里绕 Y 轴的 t * omega 同步（待机形态 shear = 0，逐粒子一致）
+    this.spinAngle += this.behaviorCurrent.x * dt;
 
     // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
     if (this.morphActive) {
@@ -1857,12 +1859,10 @@ class NebulaEngine {
       Math.cos(this.camPhi) * r,
       Math.sin(this.camPhi) * Math.sin(this.camTheta) * r,
     );
-    this.camera.lookAt(0, 0, 0);
-
-// 潜入：形变前半段把视线钉在目标星巢上，随后收回原点，权重随形变进度退坡
+    // 潜入：形变前半段把视线钉在目标星巢上，随后收回原点，权重随形变进度退坡。
+    // 只调用一次 lookAt（原来先 lookAt 原点、再 lookAt lookAtPoint，前一次是永久无效的死代码）
     if (this.focusBase) {
-      const rotated = this.focusCurrentFromArm(0);
-      this.focusTarget.copy(rotated);
+      this.focusTarget.copy(this.focusCurrentFromArm());
     }
 
     this.focusWeight = this.morphActive
@@ -1895,8 +1895,6 @@ class NebulaEngine {
       const alphaAttr = this.constellationMesh.geometry.getAttribute('aAlpha') as THREE.BufferAttribute;
       const alphaArr = alphaAttr.array as Float32Array;
       let vi = 0;
-      // 只有 alpha 真的在动才上传：稳定态下每帧重写整块缓冲是白给的带宽
-      let alphaChanged = false;
       for (let i = 0; i < CONSTELLATIONS.length; i++) {
         const c = CONSTELLATIONS[i];
         const isActive = c.id === activeConst;
@@ -1905,11 +1903,8 @@ class NebulaEngine {
           : isActive
             ? constActiveAlpha()
             : CONST_ALPHA_CHART;
-        const prev = this.constAlpha[i] ?? 0;
-        const next = THREE.MathUtils.damp(prev, target, 2.4, dt);
-        this.constAlpha[i] = next;
-        if (Math.abs(next - prev) > 0.001) alphaChanged = true;
-        const a = next;
+        this.constAlpha[i] = THREE.MathUtils.damp(this.constAlpha[i] ?? 0, target, 2.4, dt);
+        const a = this.constAlpha[i];
         const nv = c.edges.length * 4;
         for (let k = 0; k < nv; k++) alphaArr[vi + k] = a;
         vi += nv;
@@ -1922,7 +1917,7 @@ class NebulaEngine {
           sprite.visible = a > 0.012;
         }
       }
-      if (alphaChanged) alphaAttr.needsUpdate = true;
+      alphaAttr.needsUpdate = true;
     }
 
     // 云气层：按预设淡入淡出（待机大星系不加，免得糊掉尘埃带）
@@ -1963,9 +1958,7 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
     const surfaceMat = (this.diskSurface.children[0] as THREE.Mesh)
       .material as THREE.MeshBasicMaterial;
     surfaceMat.opacity = this.surfaceCurrent;
-    // 底纹与粒子共用 spinPhase：此前用独立的恒定 spinAngle，能量/中频调制一介入
-    // 二者角速度就分叉，臂与底纹慢慢错位。
-    this.diskSurface.rotation.y = this.spinPhase;
+    this.diskSurface.rotation.y = this.spinAngle;
     glowMat.color.copy(this.uniformColors[2]);
 
     // Bloom：bass 托起辉光体量、mid 拓宽辉光范围，潮汐高潮涨起、低落略减光；
@@ -1978,12 +1971,6 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
 
     // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
     this.vignette.uniforms.uAmount.value = 0.3 + this.grooveBass * 0.12;
-
-    // 胶片层：冲击波瞬间的径向推挤最强，平时只有极轻的颗粒与边缘色差
-    if (this.film) {
-      this.film.uniforms.uTime.value = t;
-      this.film.uniforms.uShock.value = Math.min(1, this.uniforms.uShockAmp.value * 0.8);
-    }
 
     // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢压暗（沿相机距离方向缩放粒子群）
     const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.06;
@@ -2019,17 +2006,20 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
         tide: +bands.tide.toFixed(3),
         level: +bands.level.toFixed(3),
       });
-      this.lowFpsStreak = !throttled && fps < 42 ? this.lowFpsStreak + 1 : 0;
-      // 形变进行中不降级：重建几何会把粒子直接瞬移到目标形态，等落定后再降
+      this.lowFpsStreak = !throttled && fps < 32 ? this.lowFpsStreak + 1 : 0;
+      // 形变进行中不降级：重建几何会把粒子直接瞬移到目标形态，等落定后再降。
+      // 另外只在开场 6 秒内判定一次：原来阈值 42fps 且任何时候都判定，
+      // 用户看着画面时会突然从 60000 掉到 14000（少 77% 粒子）—— 观感上就是"突然变单调"。
       if (
         this.warmup > 3 &&
+        this.warmup < 6 &&
         this.lowFpsStreak >= 3 &&
-        this.count > 14000 &&
+        this.count > 38000 &&
         !this.morphActive &&
         !this.downgraded
       ) {
         this.downgraded = true;
-        this.applyCount(14000);
+        this.applyCount(38000);
       }
       this.fpsAccum = 0;
       this.fpsFrames = 0;
@@ -2087,7 +2077,6 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
     this.cloudMaterial.dispose();
     this.cloudTexture.dispose();
     this.texture.dispose();
-    this.film?.material.dispose();
     this.composer.dispose();
     this.renderer.dispose();
     if (el.parentElement === this.container) this.container.removeChild(el);
