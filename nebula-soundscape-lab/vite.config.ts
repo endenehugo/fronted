@@ -17,5 +17,13 @@ export default defineConfig({
       },
     },
   },
-  server: { port: 5173, open: false },
+  server: {
+    port: 5173,
+    open: false,
+    watch: {
+      // Windows 上编辑器/工具的原子写会在源目录生成 `.xxx.tmpdir` 临时目录，
+      // chokidar 去监听里面被占用的临时文件会直接 EBUSY 把 dev server 搞崩，这里排除掉
+      ignored: ['**/*.tmpdir/**', '**/*.tmpdir', '**/.*.tmp'],
+    },
+  },
 });

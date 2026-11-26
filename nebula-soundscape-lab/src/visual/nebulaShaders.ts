@@ -101,6 +101,7 @@ attribute float aRandom;          // 错峰飞行种子 0~1
 attribute vec3  aColor;           // 逐顶点颜色（待机星系的多色层次）
 attribute float aColorW;          // 顶点色权重：1 → aColor，0 → colorT 渐变
 attribute float aTargetColorW;    // 目标顶点色权重
+attribute float aShape;           // 粒子形状：0 圆点 / 1 四芒星 / 2 细光条（固有属性，形变不插值）
 
 uniform float uTime;
 uniform float uMorphProgress;     // 0.0 → 1.0
@@ -122,11 +123,13 @@ uniform vec3  uBurstPos;
 uniform float uBurstAmp;
 uniform float uPixelRatio;
 uniform float uSize;
+uniform float uViewHeight;        // 视口 CSS 高度，用于把点尺寸换算成与分辨率无关的像素
 uniform vec3  uColors[3];
 
 varying vec3  vColor;
 varying float vGlow;
 varying float vAlpha;
+varying float vShape;
 
 ${NOISE_GLSL}
 
@@ -220,13 +223,25 @@ void main() {
 
   // ================= 4. 投影与尺寸 =================
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
+  vShape = aShape;
+
+  // 深度线索：远处粒子更暗更小，近处粒子淡出（推近镜头时不会糊成一屏大光斑）。
+  // 加色混合没有前后遮挡，只能靠这两条渐隐制造体积感；下限取 0.62，避免外缘被压得看不见。
+  float depth = max(0.35, -mv.z);
+  float depthFade = smoothstep(30.0, 6.0, depth);
+  float nearFade = smoothstep(0.45, 1.9, depth);
 
   float twinkle = 1.0 + uTreble * role * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
   // 低频推核心脉冲尺寸，高频推外围星尘闪烁尺寸，潮汐高潮整体更饱满
   float sizePx = sizeT * uSize * uPixelRatio * twinkle
     * (1.0 + uBass * 0.35 * role + burst * 1.8)
-    * (0.85 + uEnergy * 0.30 + uTreble * 0.30 * role);
-  gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
+    * (0.85 + uEnergy * 0.30 + uTreble * 0.30 * role)
+    * mix(0.78, 1.0, depthFade);
+  // 四芒星要更大的点面积才撑得开星芒
+  if (vShape > 0.5 && vShape < 1.5) sizePx *= 1.7;
+  // 34.0 是 900px 视高下的经验系数，按视高归一后大小与分辨率无关；同时夹住移动端 GPU 的点尺寸上限
+  float pxScale = 34.0 * (uViewHeight / 900.0);
+  gl_PointSize = clamp(sizePx * pxScale / depth, 0.6, 160.0);
   gl_Position = projectionMatrix * mv;
 
   // ================= 5. 颜色 =================
@@ -244,7 +259,8 @@ void main() {
         + burst * 1.8
         + wave * 1.0
         + (uEnergy - 0.5) * 0.22;
-  vAlpha = (0.14 + 0.5 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2);
+  vAlpha = (0.18 + 0.58 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2)
+         * mix(0.62, 1.0, depthFade) * nearFade;
 }
 `;
 
@@ -256,14 +272,34 @@ uniform sampler2D uMap;
 varying vec3  vColor;
 varying float vGlow;
 varying float vAlpha;
+varying float vShape;
 
 void main() {
   vec4 tex = texture2D(uMap, gl_PointCoord);
   vec2 uv = gl_PointCoord - 0.5;
   float d = length(uv) * 2.0;
-  float falloff = exp(-d * d * 2.4);
-  float a = tex.a * falloff * vAlpha;
-  vec3 c = vColor * (0.3 + vGlow * 0.55);
+  // 圆点：高斯核
+  float disc = tex.a * exp(-d * d * 2.4);
+
+  float mask = disc;
+  float gain = 1.0;
+
+  if (vShape > 0.5 && vShape < 1.5) {
+    // 四芒星：横竖两条高次幂窄带交叉，中心保留一点圆核，尖角自然收束
+    float sx = pow(max(0.0, 1.0 - abs(uv.y) * 30.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.x) * 2.6), 1.5);
+    float sy = pow(max(0.0, 1.0 - abs(uv.x) * 30.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.y) * 2.6), 1.5);
+    mask = disc * 0.28 + (sx + sy) * 1.7;
+    gain = 1.25;
+  } else if (vShape > 1.5) {
+    // 细光条：沿 X 拉长的软线，像被潮汐扯开的气体丝
+    float streak = exp(-uv.y * uv.y * 320.0) * exp(-abs(uv.x) * 2.0);
+    mask = disc * 0.22 + streak;
+    gain = 0.92;
+  }
+
+  float a = mask * vAlpha;
+  // 基色提到 0.42（原 0.30）：ACES 会压中间调，粒子本体需要更足的亮度垫底
+  vec3 c = vColor * (0.42 + vGlow * 0.72) * gain;
   gl_FragColor = vec4(c, a);
 }
 `;
@@ -278,15 +314,18 @@ precision highp float;
 attribute vec3  aColor;
 attribute float aSize;
 attribute float aSeed;
+attribute float aShape;           // 0 圆点 / 1 带芒亮星
 
 uniform float uTime;
 uniform float uPixelRatio;
 
 varying vec3  vColor;
 varying float vAlpha;
+varying float vShape;
 
 void main() {
   vColor = aColor;
+  vShape = aShape;
   vAlpha = 0.6 + 0.4 * sin(uTime * (0.35 + aSeed * 0.9) + aSeed * 40.0);
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_PointSize = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z));
@@ -298,13 +337,23 @@ export const starfieldFragmentShader = /* glsl */ `
 precision highp float;
 
 uniform sampler2D uMap;
+uniform float uOpacity;      // CPU 按低频驱动的整体明度（ShaderMaterial 的 opacity 属性不会自动生效）
 
 varying vec3  vColor;
 varying float vAlpha;
+varying float vShape;
 
 void main() {
   vec4 tex = texture2D(uMap, gl_PointCoord);
-  gl_FragColor = vec4(vColor, tex.a * vAlpha);
+  vec2 uv = gl_PointCoord - 0.5;
+  float disc = tex.a;
+  if (vShape > 0.5) {
+    // 亮星十字星芒：只在少量恒星上出现，是"天文照片感"最省成本的一笔
+    float sx = pow(max(0.0, 1.0 - abs(uv.y) * 26.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.x) * 2.2), 1.4);
+    float sy = pow(max(0.0, 1.0 - abs(uv.x) * 26.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.y) * 2.2), 1.4);
+    disc = disc * 0.3 + (sx + sy) * 0.9;
+  }
+  gl_FragColor = vec4(vColor, disc * vAlpha * uOpacity);
 }
 `;
 
@@ -337,6 +386,192 @@ export const VignetteShader = {
       float vig = smoothstep(0.72, 0.28, d);
       c.rgb *= mix(1.0 - uAmount, 1.0, vig);
       gl_FragColor = c;
+    }
+  `,
+};
+
+// ---------------------------------------------------------------- 背景云气层
+
+/**
+ * 云气层顶点着色器：只是一张铺满画面的单位平面（挂在相机下，随相机朝向）。
+ * 真正的云来自 CPU 一次性生成的周期性 FBM 贴图，片元里做两层反向漂移，
+ * 所以每帧成本只有两次纹理采样，不占片元算力。
+ */
+export const cloudVertexShader = /* glsl */ `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const cloudFragmentShader = /* glsl */ `
+precision highp float;
+
+uniform sampler2D uCloud;
+uniform float uTime;
+uniform float uEnergy;      // 潮汐呼吸慢包络
+uniform float uBass;
+uniform float uOpacity;     // 由 CPU 按预设淡入淡出（待机 M31 不加云气）
+uniform vec3  uColors[3];
+
+varying vec2 vUv;
+
+void main() {
+  // 两层反向漂移：低层慢、上层快，错开后看不出贴图重复
+  vec2 uv1 = vUv + vec2(uTime * 0.0045, uTime * 0.0026);
+  vec2 uv2 = vUv * 1.9 + vec2(-uTime * 0.0072, uTime * 0.0031);
+  float n1 = texture2D(uCloud, uv1).r;
+  float n2 = texture2D(uCloud, uv2).r;
+  float n = n1 * 0.66 + n2 * 0.34;
+
+  // 径向遮罩：只有中心附近有云，边缘干净，避免整屏糊一层雾
+  vec2 c = (vUv - 0.5) * vec2(1.0, 1.35);
+  float core = smoothstep(0.52, 0.02, length(c));
+
+  // 亮度：深空微光 × 潮汐呼吸 × 低频推亮；幂次让稀薄区更通透
+  float dens = pow(clamp(n, 0.0, 1.0), 2.4);
+  float glow = dens * core * uOpacity * (0.55 + uEnergy * 0.55 + uBass * 0.18);
+
+  vec3 col = mix(uColors[2], uColors[1], clamp(n * 1.35, 0.0, 1.0));
+  gl_FragColor = vec4(col, glow * 0.06);
+}
+`;
+
+// ---------------------------------------------------------------- 星座连线
+
+/**
+ * 星座连线（屏幕空间扩展版）。
+ *
+ * WebGL 的 `gl.LINES` 线宽在多数平台被固定为 1px，所以这里没用 LineSegments：
+ * 每条边用 4 个顶点拼成一条细带，在顶点着色器里沿屏幕空间法线外扩，宽度可控（uWidthPx）。
+ * 位置仍取真实赤经赤纬算出的 3D 坐标，所以相机怎么转、星野怎么自转，线都和星点严丝合缝。
+ */
+export const constellationVertexShader = /* glsl */ `
+precision highp float;
+
+attribute vec3  aStart;
+attribute vec3  aEnd;
+attribute float aSide;       // -1 / +1：细带的左右两侧
+attribute float aT;          // 0 起点 → 1 终点
+attribute float aDelay;      // 该边在描线动画里的延迟 0~0.35
+attribute float aAlpha;      // 该星座当前整体透明度（CPU 逐帧写）
+attribute vec3  aColor;
+
+uniform float uWidthPx;      // 线宽（设备像素）
+uniform vec2  uResolution;   // 画布设备像素尺寸
+uniform float uDraw;         // 描线进度 0~1
+
+varying vec3  vColor;
+varying float vAlpha;
+varying float vSide;
+varying float vT;
+
+void main() {
+  vec4 cs = projectionMatrix * modelViewMatrix * vec4(aStart, 1.0);
+  vec4 ce = projectionMatrix * modelViewMatrix * vec4(aEnd, 1.0);
+  vec4 base = mix(cs, ce, aT);
+
+  // 先投到 NDC 求方向，再换回 clip space 施加偏移：乘 base.w 让偏移在屏幕上保持恒定的像素宽度
+  vec2 s = cs.xy / max(0.001, cs.w);
+  vec2 e = ce.xy / max(0.001, ce.w);
+  vec2 dir = e - s;
+  dir = length(dir) < 1e-5 ? vec2(1.0, 0.0) : normalize(dir);
+  vec2 nrm = vec2(-dir.y, dir.x);
+  base.xy += nrm * (aSide * uWidthPx * 0.5) * (2.0 / uResolution) * base.w;
+
+  vColor = aColor;
+  vSide = aSide;
+  vT = aT;
+  // 描线：每条边按 aDelay 错峰出现，前沿做一点柔化
+  float p = clamp((uDraw - aDelay) / max(0.001, 1.0 - aDelay), 0.0, 1.0);
+  vAlpha = aAlpha * (1.0 - smoothstep(p, p + 0.10, aT));
+  gl_Position = base;
+}
+`;
+
+export const constellationFragmentShader = /* glsl */ `
+precision highp float;
+
+varying vec3  vColor;
+varying float vAlpha;
+varying float vSide;
+varying float vT;
+
+void main() {
+  // 软边：中心实、两侧渐隐，读起来像一根发光细丝而不是几何线
+  float edge = 1.0 - smoothstep(0.30, 1.0, abs(vSide));
+  // 沿线极轻微的呼吸，避免机械直线感
+  float breathe = 0.86 + 0.14 * sin(vT * 6.2831 + 1.7);
+  gl_FragColor = vec4(vColor, vAlpha * edge * breathe);
+}
+`;
+
+// ---------------------------------------------------------------- 胶片层（颗粒 / 色差 / 冲击波）
+
+/**
+ * 最后一层：极轻的色差 + 亮度反相关颗粒 + 超新星径向冲击。
+ * - 色差把边缘的红/蓝轻微错开，消除"数码感"；
+ * - 颗粒只在中间调出现，纯暗区保持干净（否则整屏像蒙了噪点）；
+ * - uShock 由 CPU 从冲击波振幅驱动（0~1），只在中环最强，中心不糊。
+ */
+export const FilmShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uAspect: { value: 1 },
+    uShock: { value: 0 },
+    /** 颗粒极轻：只在中间调出现，纯暗区保持干净（否则整屏像蒙了噪点） */
+    uGrain: { value: 0.006 },
+    uCA: { value: 0.22 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uAspect;
+    uniform float uShock;
+    uniform float uGrain;
+    uniform float uCA;
+
+    varying vec2 vUv;
+
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main() {
+      vec2 uv = vUv;
+      vec2 c = uv - 0.5;
+      float r = length(vec2(c.x * uAspect, c.y));
+      vec2 dir = normalize(c + vec2(1e-5));
+
+      // 冲击波：径向推挤，中心弱、中环最强
+      float shock = uShock * exp(-pow(r - 0.35, 2.0) * 12.0);
+      uv += dir * shock * 0.03;
+
+      // 色差：越靠边缘越明显，爆发瞬间额外加强
+      float ca = (uCA + shock * 2.4) * (0.35 + r * 0.9);
+      vec3 col = vec3(
+        texture2D(tDiffuse, uv + dir * ca * 0.0016).r,
+        texture2D(tDiffuse, uv).g,
+        texture2D(tDiffuse, uv - dir * ca * 0.0016).b
+      );
+
+      // 颗粒：只作用于中间调（纯黑区不撒噪），幅度极轻，避免"脏"
+      float lum = dot(col, vec3(0.299, 0.587, 0.114));
+      float n = hash(floor(gl_FragCoord.xy) + floor(uTime * 60.0)) - 0.5;
+      float grainMask = smoothstep(0.04, 0.30, lum) * (1.0 - smoothstep(0.75, 1.0, lum));
+      col += n * uGrain * grainMask;
+
+      col *= 1.0 + shock * 0.10;
+      gl_FragColor = vec4(col, 1.0);
     }
   `,
 };

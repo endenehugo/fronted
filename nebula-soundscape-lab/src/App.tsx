@@ -42,6 +42,8 @@ export default function App() {
 
   /** 效价滑块：-1 低落负向 ↔ 1 正向明亮；null 跟随文本解析结果 */
   const [valence, setValence] = useState<number | null>(null);
+  /** 星图模式：所有星座连线一起显现（键盘 C 或底部按钮） */
+  const [starchart, setStarchart] = useState(false);
 
   const canvasRef = useRef<NebulaCanvasHandle>(null);
   const audio = useMemo(() => NebulaAudioEngine.getInstance(), []);
@@ -269,6 +271,7 @@ export default function App() {
   }, [presetId, input, palette, turbulence, speed, emotion, valence, preset.colors]);
 
   const handleClosePostcard = useCallback(() => setPostcard(null), []);
+  const handleToggleStarchart = useCallback(() => setStarchart((v) => !v), []);
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-black text-white">
@@ -281,6 +284,8 @@ export default function App() {
         turbulence={turbulence}
         speed={speed}
         valence={valence}
+        starchart={starchart}
+        onToggleStarchart={handleToggleStarchart}
         onStats={setStats}
       />
 
@@ -376,6 +381,8 @@ export default function App() {
           scaleId={scaleId}
           onTimbre={handleTimbre}
           onScale={handleScale}
+          starchart={starchart}
+          onStarchart={handleToggleStarchart}
         />
       )}
 

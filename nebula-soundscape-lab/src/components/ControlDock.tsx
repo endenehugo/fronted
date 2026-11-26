@@ -1,4 +1,4 @@
-import { AudioLines, Camera, ChevronDown, Link2, Music2, Sparkles, Volume1, Volume2, VolumeX, X } from 'lucide-react';
+import { AudioLines, Camera, ChevronDown, Link2, Music2, Orbit, Sparkles, Volume1, Volume2, VolumeX, X } from 'lucide-react';
 import {
   useEffect,
   useRef,
@@ -41,6 +41,9 @@ interface Props {
   scaleId: ScaleId;
   onTimbre: (id: TimbreId) => void;
   onScale: (id: ScaleId) => void;
+  /** 星图模式：所有星座连线一起显现（快捷键 C） */
+  starchart: boolean;
+  onStarchart: () => void;
 }
 
 const chipClass = (active: boolean): string =>
@@ -236,6 +239,7 @@ export default function ControlDock(props: Props) {
   const { value, onChange, onSubmit, onClear, valence, onValence } = props;
   const { volume, muted, onVolume, onToggleMute, onCapture, onShare, busy } = props;
   const { timbre, scaleId, onTimbre, onScale } = props;
+  const { starchart, onStarchart } = props;
   const idle = mode === 'idle';
   const scaleName = scaleDisplayName(preset, scaleId);
   const valenceValue = valence ?? 0;
@@ -312,6 +316,22 @@ export default function ControlDock(props: Props) {
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* 星图：一键让所有星座连线显现（快捷键 C） */}
+            <button
+              type="button"
+              onClick={onStarchart}
+              aria-pressed={starchart}
+              title={starchart ? '关闭星图连线（C）' : '显示星座连线（C）'}
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
+                starchart
+                  ? 'border-white/40 bg-white/[0.16] text-white shadow-[0_0_18px_-4px_rgba(255,255,255,0.7)]'
+                  : 'border-white/10 bg-white/[0.04] text-white/85 hover:border-white/25 hover:bg-white/[0.1] hover:text-white'
+              }`}
+            >
+              <Orbit size={13} className={starchart ? 'text-white' : 'text-white/60'} />
+              <span className="hidden md:inline">星图</span>
+            </button>
+
             {/* 音色 / 音阶 紧凑选择器 */}
             <GlassSelect
               icon={<AudioLines size={13} />}
