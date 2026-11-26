@@ -113,6 +113,8 @@ uniform float uShear;             // 开普勒差速强度
 uniform float uBass;
 uniform float uMid;
 uniform float uTreble;
+uniform float uEnergy;            // 潮汐呼吸慢包络 0~1（总 RMS × 旋律潮汐，damp 平滑）
+uniform float uSpinPhase;         // 自转积分角（CPU 逐帧累加 dt × 角速度，含 uBehavior.x 与潮汐因子）
 uniform float uCollapse;
 uniform float uShockRadius;
 uniform float uShockAmp;
@@ -165,9 +167,10 @@ void main() {
   // ================= 2. 分形态动态物理 =================
   float r = length(base.xz);
 
-  // 2.1 自转 + 开普勒差速（内快外慢）
-  float omega = uBehavior.x * (1.0 + uShear * role / (0.35 + r));
-  base.xz = rot2(base.xz, t * omega);
+  // 2.1 自转 + 开普勒差速（内快外慢）。
+  //     转角必须用 CPU 积分的 uSpinPhase：若写成 uTime × ω，潮汐改变 ω 时粒子会瞬间多转「运行秒数 × Δω」，
+  //     页面开得越久转得越快。角速度随潮汐能量与中频在约 2.5 倍范围内起伏：高潮加速、低落近乎静止。
+  base.xz = rot2(base.xz, uSpinPhase * (1.0 + uShear * role / (0.35 + r)));
 
   // 2.1b 六条情绪悬臂各自的差速自转：每条臂一个转速，臂与臂之间缓慢错开；
   //      形变一开始就收束回统一转速，避免过渡期被甩出去。
@@ -194,6 +197,11 @@ void main() {
   float n2 = snoise(np * 1.8 + vec3(7.3, -t * 0.15, 3.1));
   base += vec3(n1, n2 * 0.7, n1 * 0.5) * uBehavior.w * (0.1 + 0.22 * role) * (0.6 + uMid * 1.3);
 
+  // 2.5 潮汐呼吸（涨起 / 沉落）：高潮整体向外扩张 +18% 并微幅上浮，低落向中心收敛 -12% 并缓缓下沉
+  float breathe = 0.88 + uEnergy * 0.30;
+  base *= breathe;
+  base.y += (uEnergy - 0.5) * 0.25;
+
   // ================= 3. 全局交互形变 =================
   // 坍缩
   base *= mix(1.0, 0.04, uCollapse);
@@ -212,7 +220,10 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
 
   float twinkle = 1.0 + uTreble * role * (0.55 + 0.45 * sin(t * 9.0 + aSeed * 60.0));
-  float sizePx = sizeT * uSize * uPixelRatio * twinkle * (1.0 + uBass * 0.35 * role + burst * 1.8);
+  // 低频推核心脉冲尺寸，高频推外围星尘闪烁尺寸，潮汐高潮整体更饱满
+  float sizePx = sizeT * uSize * uPixelRatio * twinkle
+    * (1.0 + uBass * 0.35 * role + burst * 1.8)
+    * (0.85 + uEnergy * 0.30 + uTreble * 0.30 * role);
   gl_PointSize = sizePx * (34.0 / max(0.1, -mv.z));
   gl_Position = projectionMatrix * mv;
 
@@ -224,12 +235,13 @@ void main() {
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
   vColor = mix(grad, aColor, colorW);
 
-  vGlow = (1.0 - colorT) * 0.4
+vGlow = (1.0 - colorT) * 0.4
         + role * 0.12
         + uBass * 0.35 * (1.0 - colorT)
         + burst * 2.4
-        + wave * 1.4;
-  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade * uMorphFade;
+        + wave * 1.4
+        + (uEnergy - 0.5) * 0.18;
+  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade * uMorphFade * (0.94 + uEnergy * 0.12);
 }
 `;
 
@@ -249,7 +261,7 @@ void main() {
   // 核更紧、边缘更快收：粒子之间才看得见「点」，整片不会糊成雾
   float falloff = exp(-d * d * 4.5);
   float a = tex.a * falloff * vAlpha;
-  vec3 c = vColor * (0.45 + vGlow * 0.85);
+  vec3 c = vColor * (0.4 + vGlow * 0.62);
   gl_FragColor = vec4(c, a);
 }
 `;
@@ -295,3 +307,36 @@ void main() {
   gl_FragColor = vec4(vColor, tex.a * vAlpha);
 }
 `;
+
+// ---------------------------------------------------------------- 后期暗角
+
+/** 电影感暗角通道：四周压暗，中心保持明亮；强度随 bass 轻微呼吸 */
+export const VignetteShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uAmount: { value: 0.42 },
+    uAspect: { value: 1 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uAmount;
+    uniform float uAspect;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec2 p = vUv - 0.5;
+      p.x *= uAspect;
+      float d = length(p);
+      float vig = smoothstep(0.72, 0.28, d);
+      c.rgb *= mix(1.0 - uAmount, 1.0, vig);
+      gl_FragColor = c;
+    }
+  `,
+};

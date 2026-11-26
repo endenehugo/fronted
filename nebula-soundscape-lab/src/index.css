@@ -53,6 +53,27 @@ canvas {
   }
 }
 
+/* 下拉玻璃面板展开动画 */
+@keyframes dock-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.dock-pop {
+  transform-origin: bottom right;
+  animation: dock-pop 0.18s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dock-pop {
+    animation: none;
+  }
+}
+
 /* 音量滑块 */
 input[type='range'] {
   -webkit-appearance: none;
@@ -86,6 +107,19 @@ input[type='range']::-moz-range-thumb {
   border: none;
   border-radius: 999px;
   background: #ffffff;
+}
+
+/* 配色滑块：轨道透明，露出元素自身的紫 → 金渐变底色 */
+input.range-spectrum::-webkit-slider-runnable-track {
+  height: 6px;
+  background: transparent;
+}
+input.range-spectrum::-webkit-slider-thumb {
+  margin-top: -2.5px;
+}
+input.range-spectrum::-moz-range-track {
+  height: 6px;
+  background: transparent;
 }
 
 ::selection {

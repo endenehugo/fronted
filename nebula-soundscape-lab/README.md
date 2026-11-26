@@ -71,7 +71,7 @@ src/
 - **独立背景星野**（`starfield*Shader`）：35~65 球壳上的常驻恒星，色温各异，不参与形变，仅缓慢微旋。
 - **星际潜入**：`MORPH_DURATION = 2.8s`，`delay = aRandom × 0.45`、`smoothstep(delay, delay + 0.55)`、三次方缓出；星系粒子按离中心的半径写 `aRandom`，核球先启航、外缘与伴星系后汇入。相机 `dist 9.37 → ~5.3` 走 `MathUtils.damp`（λ 1.6），途中穿插潮汐旋涡 `uTransitionSwirl`。中途被打断时 `bakeMorphSnapshot` 把 position / size / role / colorT / colorW 一并烘焙。
 - **UI 流**（`App.tsx` / `ControlDock.tsx`）：`mode = idle | body`。待机态只有极简标题「在群星之间写下此刻的心绪」+ 底部心情输入与 6 个灵感词胶囊；进入星体后左上「← 返回大星系」，底部为观测名 / 诗意解读 / 音阶提示 / 明信片。
-- **声景联动**（`NebulaAudioEngine.ts`）：待机态低通 320Hz 深空铺底；潜入后 2.5s 内 `setTargetAtTime(…, 0.6)` 开到 1400Hz 并渐入泛音。
+- **声景联动**（`NebulaAudioEngine.ts`）：待机态旋律总线压到 0.08；潜入后 τ=0.6 渐入到 1。
 
 ### 1. 六大情绪的专属几何拓扑
 
@@ -108,7 +108,7 @@ src/
 
 `NebulaAudioEngine.transition(2.0)` 与画面形变同长：粉红噪声经带通滤波做中心频率
 220 Hz → 2.6 kHz → 320 Hz 的上扫回落（星尘气流），叠加 48 → 96 → 42 Hz 的低频涌动，
-同时压低 Drone 层把中频让给过渡音、落定后按预设回位；形变结束时 `arrive()` 用调式内
+同时形变结束时 `arrive()` 用调式内
 三音给出「到位」的听觉锚点。
 
 ### 3. 分形态动态物理 `uBehavior`
@@ -161,13 +161,14 @@ src/
 
 ### 7. 程序化星际合成器
 
-`NebulaAudioEngine` 为单例，四层架构：
+`NebulaAudioEngine` 为单例，两层架构（无任何持续铺底层）：
 
-1. **Ambient Drone**：3 个振荡器（sine ±6¢ / triangle）+ 低通 + 0.05 Hz LFO。
-2. **Generative Chimes**：按预设 BPM 的八分音符 lookahead 调度，马尔可夫音级游走（偏好小音程），
+1. **Generative Chimes**：按预设 BPM 的八分音符 lookahead 调度，马尔可夫音级游走（偏好小音程），
    立体声反馈延迟（0.375s / 0.52s，交叉反馈 + 低通阻尼）模拟宇宙混响。
-3. **Interactive Synth**：FM 钟琴音色，Attack 15ms / Release 1.8s。
-4. **Solar Wind**：Paul Kellet 粉红噪声 Buffer + 带通滤波，随星云转速调整风声。
+2. **Interactive Synth**：8 种程序化音色，见第 10 节。
+
+> 原有 **Ambient Drone**（持续正弦和声）与 **Solar Wind**（粉红噪声铺底）两层已按用户试听要求移除：
+> 分层静音实测 Drone 占总输出 RMS 的 92%，是「低沉嗡嗡声」的来源；任何持续纯音都有这个问题。
 
 > 浏览器自动播放合规：首屏 `IGNITE NEBULA` 按钮内执行 `audioContext.resume()`，
 > 主增益从 0.0001 用 2.4s 指数淡入，杜绝爆音。
@@ -191,6 +192,34 @@ src/
   初始化时反解并 100% 还原，解压失败自动回退明文 Base64。
 
 ---
+
+### 10. 八种程序化音色 · 音阶切换器 · 潮汐呼吸
+
+- **`playNote(freq, velocity, timbre, opts)`**（`NebulaAudioEngine.ts`）是唯一发声入口，替换了原先的单一 FM 铃铛；所有振幅包络都是 `0.0001 →(指数爬坡 attack)→ 峰值 →(指数衰减 release)→ 0.0001`，杜绝爆音。同时发声上限 48（`MAX_VOICES`），超出直接丢弃。音色清单见 `audio/timbres.ts`：
+
+  | id | 名称 | 合成配方 | 起音 / 释放 | 预设默认绑定 |
+  |---|---|---|---|---|
+  | `crystal_bowl` | 水晶颂钵 | `1f + 2.756f + 5.404f` 三正弦，±3 cents 失谐 | 0.35s / 3.2s | 仙女座待机态 |
+  | `pluck_harp` | 尼龙拨弦 | 三角波，低通 3200→320Hz（0.25s 指数衰减） | 0.01s / 1.4s | 红巨星 · 释放 |
+  | `cosmic_rhodes` | 太空电钢 | FM（载波 1f、调制 2f，深度 0.15s 衰减）+ 低通 + 0.4Hz 立体声摇摆 | 0.02s / 2.4s | 暗物质 · 深思 |
+  | `vibraphone` | 太空颤音琴 | `1f` 正弦 + `3.98f` 短衰减金属泛音 + 5.5Hz 音量颤音 | 0.01s / 2.6s | 猎户座 · 静谧 |
+  | `synth_pad` | 温暖垫音 | 三角 / 锯齿 ±7 cents + 慢扫频低通 380→2400→700Hz | 0.5s / 2.5s | 高潮底层垫音 |
+  | `nebula_brass` | 深空号角 | 三锯齿 −8/0/+8 cents + 共振低通 180→1600Hz（0.6s） | 0.35s / 2.0s | 超新星 · 狂喜 |
+  | `ethereal_choir` | 空灵合唱 | 失谐锯齿并联三母音共振峰带通 320 / 800 / 2500Hz | 0.6s / 2.6s | 创生之柱 · 治愈 |
+  | `arp_pluck` | 脉冲琶音 | 锯齿 + `0.5f` 正弦 + 高共振低通 3600→240Hz（0.12s） | 0.005s / 0.9s | 脉冲星 · 专注 |
+
+  每个情绪预设通过 `NebulaPreset.timbre` 绑定推荐音色；控制栏手动切换后 `timbreLocked` 置位，换星体不再回落。键盘拨弦 / 点击 / 悬停 / 落定确认音都走当前音色。
+- **音阶切换器**（`scales.ts`）：`SCALE_LIBRARY` 含大调五声、自然小调、多利亚、利底亚、弗里吉亚五种调式（音程数组，`buildScale` 按 MIDI→Hz 换算，`A3 = 220Hz` / `C4` 为基准）。`presetScale(preset, scaleId)`：`'preset'` 沿用星体自带调式，否则以星体主音为根套用调式库；顶栏与控制栏实时显示 `scaleDisplayName`。
+- **潮汐起伏自动旋律**：`tideAt(t) = (0.5 − 0.5·cos(2πt/14))^1.6`，14s 一个周期、低潮段被拉长。八分音符步进时按潮汐取密度：低潮约每 2.5s 一颗单音，高潮逼近每步一颗；`tide > 0.55` 概率叠加三度 / 四度双音，`tide > 0.8` 再垫一颗低八度 `synth_pad`。待机大星系整体密度 ×0.22。
+- **铺底层已全部移除**：分层静音实测，原 Drone 层（持续正弦和声）占总输出 RMS 的 92%，是用户听到的「低沉嗡嗡声」来源；随后太阳风噪声铺底也按用户要求删除。引擎里不再有任何持续发声的节点，只有旋律、交互音与过渡音效。
+- **视觉「潮汐呼吸」四维同步**（`NebulaCanvas.tsx` / `nebulaShaders.ts`）：
+  - 慢包络 `uEnergy`：目标 = `tide × 0.7 + level × 0.7 + tide × level × 0.1`（`level` 为时域 RMS，已扣除铺底本底并按高潮段满刻度归一化），上升 λ=6（≈0.5s 到 95%）、回落 λ=1.7（≈1.8s），音频未就绪时停在 0.35。
+  - ① 整体缩放与沉浮：`base *= 0.88 + uEnergy × 0.30`（高潮 +18%、低落 −12%），`base.y += (uEnergy − 0.5) × 0.25`。
+  - ② 旋臂转速：转角由 CPU 逐帧积分 `spinPhase += dt × uBehavior.x × (0.25 + uEnergy × 0.5 + uMid × 0.25)` 传入 `uSpinPhase`，
+    着色器 `rot2(base.xz, uSpinPhase × 差速项)`。不能用 `uTime × ω`：潮汐改变 ω 时粒子会瞬间多转「运行秒数 × Δω」，页面开得越久转得越快。
+  - ③ 粒子与核心：`gl_PointSize × (0.85 + uEnergy × 0.30 + uTreble × 0.30 × role)`，核心 Sprite 随 `uBass` 脉冲并随 `uEnergy` 额外胀大。
+  - ④ 辉光明暗：`vGlow += (uEnergy − 0.5) × 0.3`、`vAlpha × (0.82 + uEnergy × 0.2)`，`UnrealBloomPass.strength = bloomCurrent × (0.7 + uEnergy × 0.45) × 0.92 + bass × 0.95 + kick`。
+- **控制栏**（`ControlDock.tsx`）：「音色」「音阶」两个玻璃拟态下拉（`GlassSelect`，自绘 listbox 经 Portal 挂到 body，原生 `<select>` 的展开列表无法定制样式），位于音量左侧，`md` 以下隐藏文字标签只留图标与当前值。
 
 ## 五、验收对照
 
