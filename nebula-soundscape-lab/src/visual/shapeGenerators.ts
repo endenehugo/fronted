@@ -529,10 +529,11 @@ const buildGalaxy: Builder = (count) => {
   // 原来连续盘那 46% 是"一整片填满的白色星云带"，结构为零、颜色发白 —— 白雾的主要来源。
   const nCore = Math.floor(count * 0.075);
   const nArms = Math.floor(count * 0.28);
-  const nField = Math.floor(count * 0.46);
+  const nField = Math.floor(count * 0.38);
   const nNest = Math.floor(count * 0.1);
   const nLink = Math.floor(count * 0.045);
-  const nFog = count - nCore - nArms - nField - nNest - nLink;
+  const nBand = Math.floor(count * 0.09);
+  const nFog = count - nCore - nArms - nField - nNest - nLink - nBand;
   const perArm = Math.floor(nArms / ARM_COUNT);
 
   const write = (
@@ -637,6 +638,32 @@ const buildGalaxy: Builder = (count) => {
       i++;
       k++;
     }
+  }
+
+  // 白色环带：绕星系核心一整圈的星尘带（内外边缘羽化 + 角向轻微起伏），
+  // 让六条臂之间不再是纯黑缝，而是被一层薄雾连成整体。粒子偏大、亮度偏低，靠叠加出连续的带感。
+  for (let k = 0; k < nBand; k++, i++) {
+    const ang = Math.random() * TAU;
+    const t = Math.random();
+    const r = 1.85 + t * 1.15;
+    // 内外两端都会淡出，避免出现硬边圆环
+    const edge = Math.sin(Math.PI * Math.min(1, Math.max(0, t)));
+    const ripple = 1 + 0.05 * Math.sin(5 * ang + 1.3) + 0.03 * Math.sin(11 * ang + 2.1);
+    const bandColor = mix3(CLOUD_WARM, [1, 1, 1], 0.55);
+    write(
+      i,
+      [
+        Math.cos(ang) * r * ripple + gauss() * 0.03,
+        gauss() * 0.05,
+        Math.sin(ang) * r * ripple + gauss() * 0.03,
+      ],
+      1.0 + Math.random() * 1.1,
+      scale3(bandColor, (0.11 + 0.19 * edge) * (0.8 + Math.random() * 0.4)),
+      0.22,
+      0.12,
+      Math.random(),
+      0,
+    );
   }
 
   // 柔光：粒子数已从 3.5% 降到约 4% 预算里的剩余部分，仍压到最低——

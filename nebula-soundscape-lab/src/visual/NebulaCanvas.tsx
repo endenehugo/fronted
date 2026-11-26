@@ -804,6 +804,9 @@ class NebulaEngine {
     this.buildCloud();
 
     this.composer = new EffectComposer(this.renderer);
+    // 后处理链缓冲按设备像素分配：只传 CSS 尺寸时，DPR>1 的屏幕上 bloom 跑在半分辨率，
+    // 亮星被低分辨率辉光放大回来就是一块块方块马赛克
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.6, 0.28, 0.72);
     this.composer.addPass(this.bloom);
@@ -1554,8 +1557,9 @@ class NebulaEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    // composer 缓冲按「CSS 尺寸 × devicePixelRatio」分配，bloom 尺寸由 composer 逐个 pass 转发
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(w, h);
-    this.bloom.setSize(w, h);
     this.vignette.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
     this.uniforms.uViewHeight.value = h;
