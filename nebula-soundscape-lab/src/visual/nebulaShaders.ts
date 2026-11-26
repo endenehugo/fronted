@@ -237,14 +237,15 @@ void main() {
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
   vColor = mix(grad, aColor, colorW);
 
-  // 基础亮度沿用 dev 的压薄压淡取值；潮汐明暗呼吸在其上叠加（高潮略亮、低落压暗到深空微光）
-  vGlow = (1.0 - colorT) * 0.26
-        + role * 0.08
-        + uBass * 0.22 * (1.0 - colorT)
-        + burst * 1.8
-        + wave * 1.0
-        + (uEnergy - 0.5) * 0.22;
-  vAlpha = (0.14 + 0.5 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2);
+  // 整体亮度：基础发光与不透明度整体抬高（实测改前画面平均亮度仅 ≈2~5/255，过暗）；
+  // 潮汐明暗呼吸在其上叠加（高潮更亮、低落略暗，但不再压到深空微光）
+  vGlow = (1.0 - colorT) * 0.30
+        + role * 0.09
+        + uBass * 0.26 * (1.0 - colorT)
+        + burst * 2.0
+        + wave * 1.15
+        + (uEnergy - 0.5) * 0.24;
+  vAlpha = (0.2 + 0.62 * (1.0 - colorT * 0.45)) * fade * (0.88 + uEnergy * 0.16);
 }
 `;
 
@@ -263,7 +264,7 @@ void main() {
   float d = length(uv) * 2.0;
   float falloff = exp(-d * d * 2.4);
   float a = tex.a * falloff * vAlpha;
-  vec3 c = vColor * (0.3 + vGlow * 0.55);
+  vec3 c = vColor * (0.4 + vGlow * 0.62);
   gl_FragColor = vec4(c, a);
 }
 `;

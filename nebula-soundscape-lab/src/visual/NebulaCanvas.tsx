@@ -1029,24 +1029,24 @@ class NebulaEngine {
     // 背景星野：缓慢微旋 + 错相位闪烁；整体明度随 bass 呼吸，低落时压暗
     this.starfield.rotation.y += dt * 0.004;
     this.starMaterial.uniforms.uTime.value = t;
-    const starDim = 0.32 + this.grooveBass * 0.38;
+    const starDim = 0.44 + this.grooveBass * 0.38;
     (this.starfield.material as THREE.ShaderMaterial).opacity = starDim;
 
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）；潮汐高潮核心额外胀大
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
-    // 核心：低频呼吸 + 潮汐高潮额外胀大；基础亮度沿用 dev 的压暗值
+    // 核心：低频呼吸 + 潮汐高潮额外胀大；基础亮度已整体抬高
     this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6 + energy * 0.25) * (0.3 + coreK * 0.8));
-    coreMat.opacity = (0.03 + bands.bass * 0.08 + energy * 0.05) * coreK;
+    coreMat.opacity = (0.05 + bands.bass * 0.09 + energy * 0.06) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
-    // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光，
-    // 并随潮汐呼吸明暗（高潮璀璨泛光、低落压暗至深空微光）
+    // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落略减光。
+    // 辉光总量克制（提亮主要靠粒子自身亮度）：再高会把星系核球糊成白团、把背景抬成灰雾
     const lift = this.grooveBass * 0.3 + this.grooveMid * 0.16;
-    this.bloom.strength = (this.bloomCurrent * 0.6 + lift) * (0.7 + energy * 0.45) + this.bloomKick;
+    this.bloom.strength = (this.bloomCurrent * 0.63 + lift) * (0.8 + energy * 0.3) + this.bloomKick;
 
     // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
-    this.vignette.uniforms.uAmount.value = 0.36 + this.grooveBass * 0.12;
+    this.vignette.uniforms.uAmount.value = 0.3 + this.grooveBass * 0.12;
 
     // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢压暗（沿相机距离方向缩放粒子群）
     const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.06;
