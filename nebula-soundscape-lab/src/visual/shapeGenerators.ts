@@ -541,7 +541,8 @@ const buildGalaxy: Builder = (count) => {
   const nFog = Math.floor(count * 0.035);
   const nNest = Math.floor(count * 0.12);
   const nLink = Math.floor(count * 0.05);
-  const nCloud = count - nCore - nArms - nFog - nNest - nLink;
+  const nBand = Math.floor(count * 0.08);
+  const nCloud = count - nCore - nArms - nFog - nNest - nLink - nBand;
   const perArm = Math.floor(nArms / ARM_COUNT);
 
   const write = (
@@ -647,7 +648,34 @@ const buildGalaxy: Builder = (count) => {
     );
   }
 
-  // ---- 六颗情绪星云：紧实的发光团，落在自己那条悬臂的随机位置上，随悬臂一起差速自转
+  // ---- 悬臂之间的白色星云带：在每条悬臂与相邻悬臂的正中间铺一条白雾，
+  //      把六条臂之间的空档连成一片，整团看起来才是完整的一座大星云。
+  const bandMid = Math.PI / ARM_COUNT;
+  for (let k = 0; k < nBand; k++, i++) {
+    const a = k % ARM_COUNT;
+    const rr = ARM_R_IN * 0.85 + Math.pow(Math.random(), 0.8) * (ARM_R_OUT - ARM_R_IN * 0.85);
+    const tn = rr / GALAXY_R;
+    // 相邻两臂正中（臂相位 + 30°），带宽随半径略微变宽
+    const ang = armAngleAt(a, rr) + bandMid + gauss() * (0.13 + 0.11 * tn);
+    const dens = Math.exp(-rr / GALAXY_SCALE_LEN);
+    const bright = (0.48 + 0.62 * dens) * (0.6 + Math.random() * 0.5);
+    write(
+      i,
+      [
+        Math.cos(ang) * rr + gauss() * 0.05,
+        gauss() * (0.05 + 0.12 * (1 - tn)),
+        Math.sin(ang) * rr + gauss() * 0.05,
+      ],
+      0.55 + Math.random() * 0.75,
+      scale3(mix3(CLOUD_WARM, CLOUD_MID, Math.random() * 0.7), 0.09 + bright * 0.1),
+      0.26,
+      0.04,
+      Math.random(),
+      0,
+    );
+  }
+
+  // ---- 六颗情绪星云：紧实的发光团，落在自己那条悬臂的随机位置上，随悬臂同步自转
   {
     const perNest = Math.floor(nNest / ARM_COUNT);
     for (let a = 0; a < ARM_COUNT; a++) {
@@ -700,7 +728,7 @@ const buildGalaxy: Builder = (count) => {
     );
   }
 
-  // ---- 六条悬臂：每条单独一色、单独转速（aArm 驱动的差速自转）
+  // ---- 六条悬臂：每条单独一色，六条臂整体同步自转
   for (let a = 0; a < ARM_COUNT; a++) {
     const pal = nestPalette(NEST_ORDER[a]);
     const per = Math.min(perArm, count - i);

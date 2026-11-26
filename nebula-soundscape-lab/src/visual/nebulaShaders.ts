@@ -179,8 +179,8 @@ void main() {
   // 2.1b 六条情绪悬臂各自的差速自转：每条臂一个转速，臂与臂之间缓慢错开；
   //      形变一开始就收束回统一转速，避免过渡期被甩出去。
   float armFade = 1.0 - smoothstep(0.0, 0.22, uMorphProgress);
-  float armId = aArm;
-  base.xz = rot2(base.xz, t * armId * 0.011 * armFade);
+  // 六条悬臂同步自转：所有粒子共用同一个角速度，不再按 aArm 差速
+  base.xz = rot2(base.xz, t * 0.011 * armFade);
 
   // 2.2 径向脉冲（随低频能量呼吸）
   float pulse = uBehavior.y * uBass * (0.55 + 0.45 * sin(t * 3.4 + aSeed * 6.2831));

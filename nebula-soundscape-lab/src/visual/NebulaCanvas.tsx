@@ -1244,12 +1244,11 @@ class NebulaEngine {
     this.uniforms.uTransitionSwirl.value = 0;
   }
 
-  /** 悬臂锚点在当前时刻的位置（与着色器里的自转/差速公式一致） */
+  /** 悬臂锚点在当前时刻的位置（与着色器里的同步自转公式一致） */
   private focusCurrentFromArm(_unused: number): THREE.Vector3 {
     const base = this.focusBase;
     if (!base) return new THREE.Vector3();
-    const a =
-      this.spinPhase + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value;
+    const a = this.spinPhase + 0.011 * this.uniforms.uTime.value;
     return new THREE.Vector3(
       base[0] * Math.cos(a) - base[2] * Math.sin(a),
       base[1],
