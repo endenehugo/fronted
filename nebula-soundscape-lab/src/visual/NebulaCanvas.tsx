@@ -541,6 +541,12 @@ class NebulaEngine {
   private disposed = false;
 
   private count: number;
+  /**
+   * 形态缓存：同一 (形态, 粒子数) 只生成一次。
+   * 6 万颗粒子的点云生成 + 十几个属性数组的拷贝原本同步发生在切预设那一帧，
+   * 是「切换时卡一下」的主要开销；缓存后第二次进同一个星体几乎零成本。
+   */
+  private shapeCache = new Map<string, ShapeAttributes>();
   private downgraded = false;
   private fpsAccum = 0;
   private fpsFrames = 0;
@@ -722,7 +728,7 @@ class NebulaEngine {
       blending: THREE.AdditiveBlending,
     });
 
-    const shape = buildShape(preset.id, this.count);
+    const shape = this.shapeFor(preset.id, this.count);
     this.points = new THREE.Points(this.buildGeometry(this.count, shape), this.material);
     this.points.frustumCulled = false;
     this.scene.add(this.points);
@@ -796,6 +802,8 @@ class NebulaEngine {
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
     this.loop();
+    // 首帧渲染之后再把其余形态在空闲时段算好，避免第一次切预设时卡一下
+    this.warmShapes();
   }
 
   // -------------------------------------------------------------- 几何
@@ -1107,6 +1115,46 @@ class NebulaEngine {
     this.cloud.scale.set(h * this.camera.aspect * 1.04, h * 1.04, 1);
   }
 
+  /** 取形态（命中缓存直接复用）；缓存里的数组只读，几何那边会自行 slice 拷贝 */
+  private shapeFor(id: PresetId, count: number): ShapeAttributes {
+    const key = `${id}:${count}`;
+    const hit = this.shapeCache.get(key);
+    if (hit) return hit;
+    const made = buildShape(id, count);
+    this.shapeCache.set(key, made);
+    return made;
+  }
+
+  /**
+   * 空闲时预热其余形态：把 6~7 次生成的开销摊到空闲帧里，
+   * 这样第一次切到某个星体也不会在形变起手那一帧卡住。
+   */
+  private warmShapes(): void {
+    const ids: PresetId[] = [
+      'galaxy_idle',
+      'serenity',
+      'euphoria',
+      'melancholy',
+      'focus',
+      'catharsis',
+      'healing',
+    ];
+    let i = 0;
+    const schedule = (fn: () => void): void => {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(fn, { timeout: 1500 });
+      else window.setTimeout(fn, 220);
+    };
+    const step = (): void => {
+      if (this.disposed) return;
+      while (i < ids.length && this.shapeCache.has(`${ids[i]}:${this.count}`)) i += 1;
+      if (i >= ids.length) return;
+      this.shapeFor(ids[i], this.count);
+      i += 1;
+      if (i < ids.length) schedule(step);
+    };
+    schedule(step);
+  }
+
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(shape.position.slice(), 3));
@@ -1130,7 +1178,7 @@ class NebulaEngine {
 
   private applyCount(n: number): void {
     this.count = n;
-    const shape = buildShape(this.shapeId, n);
+    const shape = this.shapeFor(this.shapeId, n);
     const geo = this.buildGeometry(n, shape);
     this.points.geometry.dispose();
     this.points.geometry = geo;
@@ -1348,7 +1396,7 @@ class NebulaEngine {
     }
 
     if (shapeChanged) {
-      this.beginMorph(buildShape(preset.id, this.count));
+      this.beginMorph(this.shapeFor(preset.id, this.count));
     }
 
     this.container.style.setProperty('--nebula-bg', preset.bg);

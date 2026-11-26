@@ -216,6 +216,24 @@ export class NebulaAudioEngine {
     this.melody = g;
   }
 
+  /** Paul Kellet 粉红噪声（生成一次后缓存复用，见 getNoise） */
+  private noiseCache: AudioBuffer | null = null;
+
+  /**
+   * 复用的粉噪声缓冲。
+   *
+   * 切换预设与超新星都要用噪声，如果每次现生成（4 秒 × 44.1kHz × 2 声道 ≈
+   * 35 万采样 × 2 的同步循环），这一步正好落在形变开始那一帧，是「切预设卡一下」的元凶之一。
+   * 这里只生成一次，音色差异交给带通滤波与播放速率去区分。
+   */
+  private getNoise(seconds: number): AudioBuffer {
+    const need = Math.max(6, seconds + 0.5);
+    if (!this.noiseCache || this.noiseCache.duration < need) {
+      this.noiseCache = this.makePinkNoise(need);
+    }
+    return this.noiseCache;
+  }
+
   /** Paul Kellet 粉红噪声 */
   private makePinkNoise(seconds = 4): AudioBuffer {
     const ctx = this.ctx!;
@@ -676,7 +694,7 @@ export class NebulaAudioEngine {
 
     // 噪声气流（星尘被卷起的摩擦感）
     const noise = ctx.createBufferSource();
-    noise.buffer = this.makePinkNoise(d + 0.6);
+    noise.buffer = this.getNoise(d + 0.6);
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
     bp.Q.value = 1.1;
@@ -742,7 +760,7 @@ export class NebulaAudioEngine {
 
     // 噪声气浪
     const noise = ctx.createBufferSource();
-    noise.buffer = this.makePinkNoise(1.6);
+    noise.buffer = this.getNoise(1.8);
     const nf = ctx.createBiquadFilter();
     nf.type = 'highpass';
     nf.frequency.value = 800;
