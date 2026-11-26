@@ -4,13 +4,11 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import {
   cloudFragmentShader,
   cloudVertexShader,
   constellationFragmentShader,
   constellationVertexShader,
-  FilmShader,
   MORPH_DELAY_MAX,
   MORPH_DELAY_WIDTH,
   MORPH_DURATION,
@@ -20,7 +18,8 @@ import {
   starfieldVertexShader,
   VignetteShader,
 } from './nebulaShaders';
-import { buildShape, type ShapeAttributes } from './shapeGenerators';
+import { createGalaxyTexture } from './galaxyTexture';
+import { buildShape, idleNestFor, type ShapeAttributes } from './shapeGenerators';
 import { PRESET_MAP } from './presets';
 import type { EmotionVector, NebulaPreset, PresetId } from '../types';
 import { NebulaAudioEngine } from '../audio/NebulaAudioEngine';
@@ -69,25 +68,10 @@ const SWIRL_AMP = 1.1;
 /** 相机指数阻尼系数 λ：1.6 时 2.8s 内收敛到 99%，与「星际潜入」形变同长 */
 const CAM_DAMP = 1.6;
 
-/**
- * 潮汐呼吸慢包络 uEnergy 的阻尼系数：上升 ≈0.5s、回落 ≈1.8s 收敛到 95%
- * （damp(x, target, λ, dt) = 1 − exp(−λ·dt)，95% 对应 t = 3/λ）
- */
-const ENERGY_DAMP_RISE = 6;
-const ENERGY_DAMP_FALL = 1.7;
-/** 音频未就绪时的包络基线：画面保持中低位的静息呼吸，而非压到最暗 */
-const ENERGY_IDLE = 0.35;
-
-/**
- * 自转角速度的潮汐因子：ω = spin × (SPIN_BASE + energy × SPIN_ENERGY + mid × SPIN_MID)。
- * 待机包络 0.35 时约 0.49，潮汐高潮约 0.95 → 高低潮之间约 2 倍速差，整体保持缓慢漂移。
- */
-const SPIN_BASE = 0.25;
-const SPIN_ENERGY = 0.5;
-const SPIN_MID = 0.25;
-
-/** 背景星野恒星数（桌面 / 移动） */
-const STARFIELD_COUNT = { desktop: 3500, mobile: 2000 };
+/** 背景星野两层：远层铺满深空，近层负责推镜视差（数量为桌面 / 移动） */
+const GALAXY_SURFACE_SIZE = 8.0;
+const STARFIELD_FAR = { desktop: 13000, mobile: 7000 };
+const STARFIELD_NEAR = { desktop: 3200, mobile: 1800 };
 
 /** 云气层平面到相机的距离（挂在相机下，随朝向一起转，只负责铺底氛围） */
 const CLOUD_DIST = 80;
@@ -361,7 +345,8 @@ function createLabelTexture(text: string): { texture: THREE.Texture; aspect: num
   g.textAlign = 'center';
   g.textBaseline = 'middle';
   g.shadowColor = 'rgba(170, 205, 255, 0.9)';
-  g.shadowBlur = 16;
+  // 外发光范围收小：之前 16px 会让字看起来糊成一团，缩到 7px 只留一圈极轻的边光
+  g.shadowBlur = 7;
   g.fillStyle = '#FFFFFF';
   g.fillText(text, cw / 2, ch / 2);
   g.shadowBlur = 0;
@@ -372,57 +357,7 @@ function createLabelTexture(text: string): { texture: THREE.Texture; aspect: num
   return { texture, aspect: cw / ch };
 }
 
-/** 切换预设瞬间的 Bloom 能量涌动：上浮量与连点封顶（防叠加爆白） */
-const BLOOM_KICK = 0.15;
-const BLOOM_KICK_MAX = 0.3;
 
-/** 全局曝光总开关：ACES 之后中间调的亮度基本由它决定，调这一个数即可整体提亮/压暗 */
-const EXPOSURE = 1.35;
-/** 粒子视觉尺寸的整体倍率（撑开点面积，减少暗区空隙感） */
-const PARTICLE_SIZE_BOOST = 1.12;
-
-/** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
-const smoothstep01 = (e0: number, e1: number, x: number): number => {
-  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
-  return t * t * (3 - 2 * t);
-};
-
-/** 配色滑块紫端的相对亮度下限（相对金端）：滑块只换颜色，两端亮度基本一致且都保持明亮 */
-const SPECTRUM_BRIGHTNESS = 0.8;
-
-/** 相对亮度（THREE.Color 的分量已处于线性工作空间，直接加权即可） */
-const relLuminance = (c: THREE.Color): number =>
-  0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-
-/** 程序化径向高斯贴图，消除方形锯齿 */
-function createParticleTexture(size = 128): THREE.CanvasTexture {
-  const c = document.createElement('canvas');
-  c.width = size;
-  c.height = size;
-  const g = c.getContext('2d');
-  if (!g) {
-    const fallback = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
-    fallback.needsUpdate = true;
-    return fallback as unknown as THREE.CanvasTexture;
-  }
-  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  grad.addColorStop(0, 'rgba(255,255,255,1)');
-  grad.addColorStop(0.22, 'rgba(255,255,255,0.82)');
-  grad.addColorStop(0.5, 'rgba(255,255,255,0.28)');
-  grad.addColorStop(0.78, 'rgba(255,255,255,0.06)');
-  grad.addColorStop(1, 'rgba(255,255,255,0)');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, size, size);
-  const tex = new THREE.CanvasTexture(c);
-  tex.needsUpdate = true;
-  return tex;
-}
-
-const isMobileDevice = (): boolean => {
-  if (typeof window === 'undefined') return false;
-  const coarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
-  return coarse || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-};
 
 /**
  * 周期性 FBM 噪声贴图（一次性 CPU 生成，256²，约 20~30 ms）。
@@ -498,6 +433,70 @@ function createCloudTexture(size = 256): THREE.Texture {
   return tex;
 }
 
+/**
+ * 潮汐呼吸慢包络 uEnergy 的阻尼系数：上升 ≈0.5s、回落 ≈1.8s 收敛到 95%
+ * （damp(x, target, λ, dt) = 1 − exp(−λ·dt)，95% 对应 t = 3/λ）
+ */
+const ENERGY_DAMP_RISE = 6;
+const ENERGY_DAMP_FALL = 1.7;
+/** 音频未就绪时的包络基线：画面保持中低位的静息呼吸，而非压到最暗 */
+const ENERGY_IDLE = 0.35;
+
+/**
+ * 自转角速度的潮汐因子：ω = spin × (SPIN_BASE + energy × SPIN_ENERGY + mid × SPIN_MID)。
+ * 待机包络 0.35 时约 0.49，潮汐高潮约 0.95 → 高低潮之间约 2 倍速差，整体保持缓慢漂移。
+ */
+const SPIN_BASE = 0.25;
+const SPIN_ENERGY = 0.5;
+const SPIN_MID = 0.25;
+
+/** 切换预设瞬间的 Bloom 能量涌动：上浮量与连点封顶（防叠加爆白） */
+const BLOOM_KICK = 0.15;
+const BLOOM_KICK_MAX = 0.3;
+
+/** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
+const smoothstep01 = (e0: number, e1: number, x: number): number => {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
+
+/** 配色滑块紫端的相对亮度下限（相对金端）：滑块只换颜色，两端亮度基本一致且都保持明亮 */
+const SPECTRUM_BRIGHTNESS = 0.8;
+
+/** 相对亮度（THREE.Color 的分量已处于线性工作空间，直接加权即可） */
+const relLuminance = (c: THREE.Color): number =>
+  0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
+/** 程序化径向高斯贴图，消除方形锯齿 */
+function createParticleTexture(size = 128): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const g = c.getContext('2d');
+  if (!g) {
+    const fallback = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    fallback.needsUpdate = true;
+    return fallback as unknown as THREE.CanvasTexture;
+  }
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.22, 'rgba(255,255,255,0.82)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+  grad.addColorStop(0.78, 'rgba(255,255,255,0.06)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const isMobileDevice = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const coarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
+  return coarse || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+};
+
 class NebulaEngine {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
@@ -509,28 +508,33 @@ class NebulaEngine {
   private points: THREE.Points;
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
+  /** 近层星野（半径更小、转得更快，提供推镜视差） */
+  private starfieldNear!: THREE.Points;
   private starMaterial!: THREE.ShaderMaterial;
-  /** 天球分组：星野 + 星座连线共用一个自转，保证线始终贴着星点 */
+  private coreSprite: THREE.Sprite;
+  /** 盘面柔光：一层屏向椭圆光斑，把点云揉成连续发光面 */
+  private diskGlow!: THREE.Sprite;
+  private diskSurface!: THREE.Group;
+  /** 底纹透明度：随 morph 淡出，避免飞向情绪星云时残留 */
+  private surfaceTarget = 0;
+  private surfaceCurrent = 0;
+  private glowTarget = 0;
+  private glowCurrent = 0;
+  /** 天球组：星座连线 + 中文名标签 + 星座主星，与星野同速自转 */
   private sky!: THREE.Group;
-  /** 星座连线（每条边 4 顶点拼成的细带） */
   private constellationMesh!: THREE.Mesh;
   private constellationMaterial!: THREE.ShaderMaterial;
-  /** 星座中文名标签（文字纹理 Sprite，随天球一起转，也能被明信片截到） */
+  private constellationStars!: THREE.Points;
   private labels: THREE.Sprite[] = [];
-  /** 每个星座当前透明度（CPU 逐帧写回 aAlpha） */
   private constAlpha: number[] = [];
-  /** 描线进度 0~1：切星体 / 切星图模式时重新"画"一遍 */
   private constDraw = 1;
   private starchart = false;
-  /** 背景云气层：单位平面挂在相机下，铺底氛围；待机 M31 时淡出 */
+  /** 背景云气层（相机下的单位平面，仅情绪星体淡入） */
   private cloud!: THREE.Mesh;
   private cloudMaterial!: THREE.ShaderMaterial;
   private cloudTexture!: THREE.Texture;
   private cloudOpacity = 0;
   private cloudTarget = 0;
-  /** 胶片层：颗粒 + 边缘色差 + 超新星径向冲击（最后一个 pass） */
-  private film!: ShaderPass;
-  private coreSprite: THREE.Sprite;
   private material: THREE.ShaderMaterial;
   private uniforms: Record<string, THREE.IUniform>;
   private texture: THREE.CanvasTexture;
@@ -585,6 +589,7 @@ class NebulaEngine {
   // 双缓冲形变
   private morphActive = false;
   private morphProgress = 0;
+  private morphArmTarget: Float32Array | null = null;
   private transitionSwirl = 0;
 
   // 配色滑块：只改色相/饱和度、不动几何与明暗；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
@@ -602,6 +607,16 @@ class NebulaEngine {
   private userCam = false;
   private velTheta = 0;
   private velPhi = 0;
+
+  // 潜入运镜：盘面累计自转角 + 目标星巢的世界坐标
+  private spinAngle = 0;
+  private focusTarget = new THREE.Vector3();
+  private focusCurrent = new THREE.Vector3();
+  /** 悬臂取景锚点（未旋转坐标）；null 表示回到原点取景 */
+  private focusBase: [number, number, number] | null = null;
+  private focusArm = 0;
+  private lookAtPoint = new THREE.Vector3();
+  private focusWeight = 0;
 
   // 交互形变
   private collapse = 1;
@@ -647,7 +662,7 @@ class NebulaEngine {
     this.starchart = starchart;
     this.onToggleStarchart = onToggleStarchart;
     this.shapeId = preset.id;
-    this.count = isMobileDevice() ? 8000 : 18000;
+    this.count = isMobileDevice() ? 20000 : 60000;
 
     const w = container.clientWidth || window.innerWidth;
     const h = container.clientHeight || window.innerHeight;
@@ -659,10 +674,6 @@ class NebulaEngine {
       preserveDrawingBuffer: true, // 明信片导出必需
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    // 色调映射：粒子是加色混合的高动态范围画面，没有 tonemap 时高光直接剪成纯白、
-    // 中间调挤在暗部 —— 这是"整体很暗"的一半原因（另一半是缺 OutputPass 的 sRGB 编码）。
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = EXPOSURE;
     this.renderer.setSize(w, h);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.domElement.style.width = '100%';
@@ -684,6 +695,7 @@ class NebulaEngine {
       uTime: { value: 0 },
       uMorphProgress: { value: 0 },
       uTransitionSwirl: { value: 0 },
+      uMorphFade: { value: 1 },
       uBehavior: { value: this.behaviorCurrent.clone() },
       uShear: { value: preset.shear },
       uBass: { value: 0 },
@@ -738,27 +750,56 @@ class NebulaEngine {
     this.coreSprite.scale.set(1.6, 1.6, 1);
     this.scene.add(this.coreSprite);
 
+    this.diskGlow = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.texture,
+        color: new THREE.Color('#F3CE96'),
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        depthTest: false,
+      }),
+    );
+    this.diskGlow.scale.set(10.6, 4.4, 1);
+    this.scene.add(this.diskGlow);
+
+    // 星系底纹：贴在盘面上的一张光面，负责「连续的盘」，粒子只负责闪烁与形变
+    this.diskSurface = new THREE.Group();
+    const surfaceMat = new THREE.MeshBasicMaterial({
+      map: createGalaxyTexture(),
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+    const surfaceMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(GALAXY_SURFACE_SIZE, GALAXY_SURFACE_SIZE),
+      surfaceMat,
+    );
+    surfaceMesh.rotation.x = Math.PI / 2;
+    this.diskSurface.add(surfaceMesh);
+    this.scene.add(this.diskSurface);
+
+    this.buildStarfield();
+
+    // 天球组：星座连线 + 星座中文名 + 星座主星，与远端星野同速自转
     this.sky = new THREE.Group();
     this.scene.add(this.sky);
-    this.buildStarfield();
+    this.buildConstellationStars();
     this.buildConstellations();
     this.buildConstellationLabels();
     this.buildCloud();
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 1.0, 0.62, 0.3);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.6, 0.28, 0.72);
     this.composer.addPass(this.bloom);
     this.vignette = new ShaderPass(VignetteShader);
     this.vignette.uniforms.uAspect.value = w / h;
     this.composer.addPass(this.vignette);
-    // 色彩管线终点：ACES 色调映射 + sRGB 编码。缺这一步，composer 里的线性色值会被当成
-    // sRGB 直接上屏 —— 设计稿里的配色显示不出来、暗部更暗、亮部剪白。
-    this.composer.addPass(new OutputPass());
-    // 胶片层放在 OutputPass 之后：颗粒与色差作用在最终显示值上，暗部不再被撒噪
-    this.film = new ShaderPass(FilmShader);
-    this.film.uniforms.uAspect.value = w / h;
-    this.composer.addPass(this.film);
 
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
@@ -768,126 +809,18 @@ class NebulaEngine {
   // -------------------------------------------------------------- 几何
 
   /**
-   * 独立背景星野：两层球壳。内层 35~65 主星群（冷白/淡蓝/暖黄），外层 70~110 更远更暗的背景星；
-   * 少量亮星加大并带彩色色温（蓝/金/红）。只用一份轻量着色器闪烁，主循环整体缓慢微旋。
+   * 背景星野两层：远层是半径 35~65 的球壳，真正的深空底噪，整层极慢微旋；
+   * 近层是半径 14~26 的一圈稀疏亮星，镜头从大星系推近小星云时会明显视差位移，
+   * 这是「潜入感」的关键——只有远层的话，推镜几乎看不出空间纵深。
    */
   private buildStarfield(): void {
-    const n = isMobileDevice() ? STARFIELD_COUNT.mobile : STARFIELD_COUNT.desktop;
-    const outer = Math.floor(n * 0.42); // 外层暗星（略减，把预算让给亮星与星座）
-    const band = Math.floor(n * 0.6); // 银河带附加恒星
-    const constCount = CONSTELLATIONS.reduce((acc, c) => acc + c.stars.length, 0);
-    const total = n + outer + band + constCount;
-    const pos = new Float32Array(total * 3);
-    const col = new Float32Array(total * 3);
-    const size = new Float32Array(total);
-    const seed = new Float32Array(total);
-    const shape = new Float32Array(total);
-    const tints: [number, number, number][] = [
-      [0.82, 0.88, 1.0], // 冷白
-      [0.66, 0.78, 1.0], // 淡蓝
-      [1.0, 0.88, 0.68], // 暖黄
-      [1, 1, 1],
-    ];
-    // 少量彩色亮星色温
-    const brightTints: [number, number, number][] = [
-      [0.62, 0.74, 1.0], // 蓝
-      [1.0, 0.86, 0.5], // 金
-      [1.0, 0.55, 0.5], // 红
-    ];
-    const place = (i: number, rMin: number, rMax: number, dim: boolean): void => {
-      const u = Math.random() * 2 - 1;
-      const ph = Math.random() * Math.PI * 2;
-      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
-      const st = Math.sqrt(1 - u * u);
-      pos[i * 3] = r * st * Math.cos(ph);
-      pos[i * 3 + 1] = r * u;
-      pos[i * 3 + 2] = r * st * Math.sin(ph);
-      const bright = !dim && Math.random() < 0.16;
-      const t = bright
-        ? brightTints[Math.floor(Math.random() * brightTints.length)]
-        : tints[Math.floor(Math.random() * tints.length)];
-      // 三档亮度：暗背景星 / 普通星 / 亮星（亮星会越过 bloom 阈值形成明显光晕）
-      const b = bright
-        ? 0.88 + Math.random() * 0.42
-        : dim
-          ? 0.14 + Math.random() * 0.16
-          : 0.5 + Math.random() * 0.32;
-      col[i * 3] = t[0] * b;
-      col[i * 3 + 1] = t[1] * b;
-      col[i * 3 + 2] = t[2] * b;
-      size[i] = bright
-        ? 6.5 + Math.random() * 5
-        : dim
-          ? 0.9 + Math.random() * 1.4
-          : 1.7 + Math.random() * 3.2;
-      seed[i] = Math.random();
-      // 亮星带十字星芒
-      shape[i] = bright ? 1 : 0;
-    };
-    for (let i = 0; i < n; i++) place(i, 35, 65, false);
-    for (let i = n; i < n + outer; i++) place(i, 70, 110, true);
-
-    // 银河带：绕一条倾斜大圆的高斯纬向分布，暖白、更暗更小；均匀球壳是"随机撒盐"，
-    // 一条斜带才能读出"这是天空"而不是"这是噪声"
-    const normal = new THREE.Vector3(0.42, 0.6, -0.68).normalize();
-    const uAxis = new THREE.Vector3(0, 1, 0).cross(normal).normalize();
-    const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
-    const dir = new THREE.Vector3();
-    const placeBand = (i: number): void => {
-      const a = Math.random() * Math.PI * 2;
-      const lat = (Math.random() + Math.random() + Math.random() - 1.5) * 0.75; // 近似高斯纬向偏移
-      dir.copy(uAxis)
-        .multiplyScalar(Math.cos(a))
-        .addScaledVector(vAxis, Math.sin(a))
-        .addScaledVector(normal, lat)
-        .normalize();
-      const r = 38 + Math.random() * 32;
-      pos[i * 3] = dir.x * r;
-      pos[i * 3 + 1] = dir.y * r;
-      pos[i * 3 + 2] = dir.z * r;
-      const warm = Math.random() < 0.6 ? tints[2] : tints[0];
-      const b = 0.12 + Math.random() * 0.26;
-      col[i * 3] = warm[0] * b;
-      col[i * 3 + 1] = warm[1] * b;
-      col[i * 3 + 2] = warm[2] * b;
-      size[i] = 0.7 + Math.random() * 1.6;
-      seed[i] = Math.random();
-      shape[i] = 0;
-    };
-    for (let i = n + outer; i < n + outer + band; i++) placeBand(i);
-
-    // 星座主星：真实赤经赤纬写进同一份点云，所以连线端点必然落在星点上（不会出现"线头悬空"）。
-    // 亮度与尺寸按星等映射，mag 1~2 的会越过 bloom 阈值形成光晕，mag 3~4 只当普通亮星。
-    let ci = n + outer + band;
-    for (const c of CONSTELLATIONS) {
-      for (const s of c.stars) {
-        const v = raDecToVec3(s.ra, s.dec, CONSTELLATION_RADIUS);
-        pos[ci * 3] = v.x;
-        pos[ci * 3 + 1] = v.y;
-        pos[ci * 3 + 2] = v.z;
-        // 星座连接点要"凸出来"：亮度、尺寸都比同星等的背景星高一档，且一律带十字星芒
-        const b = Math.min(1.25, magToBrightness(s.mag) * 1.12);
-        col[ci * 3] = c.tint[0] * b;
-        col[ci * 3 + 1] = c.tint[1] * b;
-        col[ci * 3 + 2] = c.tint[2] * b;
-        size[ci] = Math.max(7.5, Math.min(15, magToSize(s.mag) * 1.45));
-        seed[ci] = Math.random();
-        shape[ci] = 1;
-        ci += 1;
-      }
-    }
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
-    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
-    geo.setAttribute('aShape', new THREE.BufferAttribute(shape, 1));
+    const mobile = isMobileDevice();
     this.starMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
         uPixelRatio: { value: this.renderer.getPixelRatio() },
-        uOpacity: { value: 0.6 },
+        // ShaderMaterial 的 opacity 属性对自定义着色器不生效，必须走 uniform
+        uOpacity: { value: 1 },
         uMap: { value: this.texture },
       },
       vertexShader: starfieldVertexShader,
@@ -897,19 +830,119 @@ class NebulaEngine {
       depthTest: false,
       blending: THREE.AdditiveBlending,
     });
-    this.starfield = new THREE.Points(geo, this.starMaterial);
-    this.starfield.frustumCulled = false;
-    this.starfield.renderOrder = -5;
-    this.sky.add(this.starfield);
+    this.starfield = this.createStarLayer(
+      35,
+      65,
+      mobile ? STARFIELD_FAR.mobile : STARFIELD_FAR.desktop,
+      1,
+    );
+    this.starfieldNear = this.createStarLayer(
+      14,
+      26,
+      mobile ? STARFIELD_NEAR.mobile : STARFIELD_NEAR.desktop,
+      0.46,
+    );
+  }
+
+  private createStarLayer(rMin: number, rMax: number, n: number, sizeScale: number): THREE.Points {
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    const size = new Float32Array(n);
+    const seed = new Float32Array(n);
+    const shape = new Float32Array(n);
+    const tints: [number, number, number][] = [
+      [0.82, 0.88, 1.0], // 冷白
+      [0.66, 0.78, 1.0], // 淡蓝
+      [1.0, 0.88, 0.68], // 暖黄
+      [1, 1, 1],
+    ];
+    const brightTints: [number, number, number][] = [
+      [0.62, 0.74, 1.0], // 蓝
+      [1.0, 0.86, 0.5], // 金
+      [1.0, 0.55, 0.5], // 红
+    ];
+    for (let i = 0; i < n; i++) {
+      // 球壳内按体积均匀分布
+      const u = Math.random() * 2 - 1;
+      const ph = Math.random() * Math.PI * 2;
+      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
+      const st = Math.sqrt(1 - u * u);
+      pos[i * 3] = r * st * Math.cos(ph);
+      pos[i * 3 + 1] = r * u;
+      pos[i * 3 + 2] = r * st * Math.sin(ph);
+      // 三档亮度：暗背景星 / 普通星 / 亮星（亮星越过 bloom 阈值形成光晕，是「夜空亮起来」的主力）
+      const bright = Math.random() < 0.16;
+      const t = bright
+        ? brightTints[Math.floor(Math.random() * brightTints.length)]
+        : tints[Math.floor(Math.random() * tints.length)];
+      const b = bright ? 0.9 + Math.random() * 0.5 : 0.32 + Math.random() * 0.42;
+      col[i * 3] = t[0] * b;
+      col[i * 3 + 1] = t[1] * b;
+      col[i * 3 + 2] = t[2] * b;
+      size[i] =
+        (bright ? 7 + Math.random() * 5.5 : 1.7 + Math.random() * 3.4) * sizeScale;
+      seed[i] = Math.random();
+      shape[i] = bright ? 1 : 0;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    geo.setAttribute('aShape', new THREE.BufferAttribute(shape, 1));
+    const points = new THREE.Points(geo, this.starMaterial);
+    points.frustumCulled = false;
+    this.scene.add(points);
+    return points;
   }
 
   /**
-   * 星座连线：每条边拆成 4 个顶点（左右两对称点），在顶点着色器里按屏幕空间法线外扩成细带。
-   * 几何量很小（8 个星座约 45 条边 ≈ 180 顶点），但能拿到可控线宽、软边和 bloom 辉光。
+   * 星座主星：真实赤经赤纬直接写进一份独立点云，和连线端点同源，所以永远不会「线头悬空」。
+   * 星等映射亮度与尺寸，mag 0~2 会越过 bloom 阈值形成光晕，mag 3~4 只当普通亮星。
+   */
+  private buildConstellationStars(): void {
+    const n = CONSTELLATIONS.reduce((acc, c) => acc + c.stars.length, 0);
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    const size = new Float32Array(n);
+    const seed = new Float32Array(n);
+    const shape = new Float32Array(n);
+    let i = 0;
+    for (const c of CONSTELLATIONS) {
+      for (const s of c.stars) {
+        const v = raDecToVec3(s.ra, s.dec, CONSTELLATION_RADIUS);
+        pos[i * 3] = v.x;
+        pos[i * 3 + 1] = v.y;
+        pos[i * 3 + 2] = v.z;
+        // 连接点要比背景星"凸出来"：亮度、尺寸都高一档，且一律带十字星芒
+        const b = Math.min(1.3, magToBrightness(s.mag) * 1.15);
+        col[i * 3] = c.tint[0] * b;
+        col[i * 3 + 1] = c.tint[1] * b;
+        col[i * 3 + 2] = c.tint[2] * b;
+        size[i] = Math.max(7.5, Math.min(16, magToSize(s.mag) * 1.5));
+        seed[i] = Math.random();
+        shape[i] = 1;
+        i += 1;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    geo.setAttribute('aShape', new THREE.BufferAttribute(shape, 1));
+    this.constellationStars = new THREE.Points(geo, this.starMaterial);
+    this.constellationStars.frustumCulled = false;
+    this.sky.add(this.constellationStars);
+  }
+
+  /**
+   * 星座连线：每条边拆成 4 个顶点（左右两对称点），顶点着色器按屏幕空间法线外扩成细带。
+   * WebGL 的 gl.LINES 线宽在多数平台恒为 1px，所以不走 LineSegments。
    */
   private buildConstellations(): void {
     const edgeCount = CONSTELLATIONS.reduce((acc, c) => acc + c.edges.length, 0);
-    const quads = edgeCount * 4; // 每条边 4 顶点
+    const quads = edgeCount * 4;
     const start = new Float32Array(quads * 3);
     const end = new Float32Array(quads * 3);
     const side = new Float32Array(quads);
@@ -928,12 +961,12 @@ class NebulaEngine {
       c.edges.forEach(([ia, ib], ei) => {
         const a = points[ia];
         const b = points[ib];
-        // 沿星座内部顺序给一点错峰延迟，看起来像一笔一笔"画"出来
         const d = Math.min(0.32, ei * 0.045);
         for (const [pt, t] of [
           [a, 0],
           [b, 1],
         ] as [THREE.Vector3, number][]) {
+          void pt;
           for (const s of [-1, 1]) {
             start[v * 3] = a.x;
             start[v * 3 + 1] = a.y;
@@ -973,10 +1006,7 @@ class NebulaEngine {
       uniforms: {
         uWidthPx: { value: CONSTELLATION_WIDTH_PX * this.renderer.getPixelRatio() },
         uResolution: {
-          value: new THREE.Vector2(
-            this.renderer.domElement.width,
-            this.renderer.domElement.height,
-          ),
+          value: new THREE.Vector2(this.renderer.domElement.width, this.renderer.domElement.height),
         },
         uDraw: { value: 1 },
       },
@@ -992,15 +1022,14 @@ class NebulaEngine {
 
     this.constellationMesh = new THREE.Mesh(geo, this.constellationMaterial);
     this.constellationMesh.frustumCulled = false;
-    this.constellationMesh.renderOrder = -4; // 连线在星点之后、星云之前
+    this.constellationMesh.renderOrder = -4;
     this.sky.add(this.constellationMesh);
     this.constDraw = 1;
   }
 
   /**
-   * 星座中文名：启动时用 canvas 各画一张文字纹理贴成 Sprite，挂在同一个天球上。
-   * 用 3D Sprite 而不是 DOM 覆盖层：它会跟着天球旋转、跟着相机透视，`capture()` 截图也能带上。
-   * 位置取该星座所有星的质心方向，再沿切平面向上偏一点，避免压在星点上。
+   * 星座中文名：canvas 画文字纹理贴成 Sprite，挂在天球组里跟随自转与相机透视，
+   * `capture()` 生成的明信片也能带上。位置取质心方向再沿切平面上移，避开星点。
    */
   private buildConstellationLabels(): void {
     const TOP = new THREE.Vector3(0, 1, 0);
@@ -1026,7 +1055,7 @@ class NebulaEngine {
         opacity: 0,
       });
       const sprite = new THREE.Sprite(material);
-      const h = 2.6; // 世界单位：在 r≈52 处约 40 px 高
+      const h = 2.6;
       sprite.scale.set(h * label.aspect, h, 1);
       sprite.position.copy(pos);
       sprite.renderOrder = -3;
@@ -1036,7 +1065,7 @@ class NebulaEngine {
     }
   }
 
-  /** 星图模式开关：切换时让连线重新"描"一遍 */
+  /** 星图模式开关：切换时让连线重新「描」一遍 */
   setStarchart(on: boolean): void {
     if (this.starchart === on) return;
     this.starchart = on;
@@ -1044,10 +1073,9 @@ class NebulaEngine {
   }
 
   /**
-   * 背景云气层：一张挂在相机前的单位平面（跟着相机转，永远铺满画面），
-   * 用 CPU 生成的周期性 FBM 贴图做两层反向漂移。它替代了此前被 revert 掉的 3D 体积雾：
-   * 那版是三维雾片把粒子裹住、成本高且浑浊；这一层在粒子之后（更远）、加色很轻，
-   * 只提供"背后有星云"的氛围，不参与遮挡也不吃粒子细节。
+   * 背景云气层：一张挂在相机前的单位平面，用 CPU 生成的周期性 FBM 贴图做两层反向漂移。
+   * 它替代了此前被 revert 掉的 3D 体积雾：那版是三维雾片把粒子裹住、成本高且浑浊；
+   * 这一层在粒子之后、加色很轻，只提供「背后有星云」的氛围。
    */
   private buildCloud(): void {
     this.cloudTexture = createCloudTexture();
@@ -1058,7 +1086,6 @@ class NebulaEngine {
         uEnergy: { value: ENERGY_IDLE },
         uBass: { value: 0 },
         uOpacity: { value: 0 },
-        // 与主星云共享同一组 Color 实例：配色滑块 / 预设切换会让云气一起变色
         uColors: { value: this.uniformColors },
       },
       vertexShader: cloudVertexShader,
@@ -1072,7 +1099,7 @@ class NebulaEngine {
     this.cloud = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.cloudMaterial);
     this.cloud.position.set(0, 0, -CLOUD_DIST);
     this.cloud.frustumCulled = false;
-    this.cloud.renderOrder = -10; // 先画云，粒子与星野叠在上面
+    this.cloud.renderOrder = -10;
     this.cloud.visible = false;
     // 挂在相机下：相机必须进场景图，其子节点才会被渲染
     this.camera.add(this.cloud);
@@ -1102,16 +1129,7 @@ class NebulaEngine {
     geo.setAttribute('aColor', new THREE.BufferAttribute(shape.color.slice(), 3));
     geo.setAttribute('aColorW', new THREE.BufferAttribute(shape.colorW.slice(), 1));
     geo.setAttribute('aTargetColorW', new THREE.BufferAttribute(shape.colorW.slice(), 1));
-
-    // 粒子形状是每颗粒子的固有属性（形变时不插值，避免中途跳形）：
-    // 核心少数四芒星、外晕少数细光条，其余保持圆点 —— 18k 个同一种高斯点看起来必然像撒砂子。
-    const shapeAttr = new Float32Array(count);
-    for (let i = 0; i < count; i++) {
-      const s = shape.seed[i];
-      const ct = shape.colorT[i];
-      shapeAttr[i] = ct < 0.36 && s < 0.11 ? 1 : ct > 0.55 && s > 0.82 ? 2 : 0;
-    }
-    geo.setAttribute('aShape', new THREE.BufferAttribute(shapeAttr, 1));
+    geo.setAttribute('aArm', new THREE.BufferAttribute(shape.arm.slice(), 1));
 
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 60);
     return geo;
@@ -1123,11 +1141,33 @@ class NebulaEngine {
     const geo = this.buildGeometry(n, shape);
     this.points.geometry.dispose();
     this.points.geometry = geo;
+    if (this.morphArmTarget) {
+      const armAttr = geo.getAttribute('aArm') as THREE.BufferAttribute | undefined;
+      const target = this.morphArmTarget;
+      if (armAttr && target.length === armAttr.count) {
+        (armAttr.array as Float32Array).set(target);
+        armAttr.needsUpdate = true;
+      }
+      this.morphArmTarget = null;
+    }
     this.morphActive = false;
     this.morphProgress = 0;
     this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
     this.uniforms.uTransitionSwirl.value = 0;
+  }
+
+  /** 悬臂锚点在当前时刻的位置（与着色器里的自转/差速公式一致） */
+  private focusCurrentFromArm(_unused: number): THREE.Vector3 {
+    const base = this.focusBase;
+    if (!base) return new THREE.Vector3();
+    const a =
+      this.spinAngle + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value;
+    return new THREE.Vector3(
+      base[0] * Math.cos(a) - base[2] * Math.sin(a),
+      base[1],
+      base[0] * Math.sin(a) + base[2] * Math.cos(a),
+    );
   }
 
   // -------------------------------------------------------------- 形变
@@ -1148,6 +1188,7 @@ class NebulaEngine {
     write('aTargetRole', next.role);
     write('aTargetColorT', next.colorT);
     write('aTargetColorW', next.colorW);
+    this.morphArmTarget = next.arm;
     // 目标形态使用逐顶点色（待机大星系）时才覆写 aColor：
     // 情绪星体的 colorW = 0，aColor 对渲染无影响，可直接当作「目标顶点色」容器
     if (next.colorW.some((w) => w > 0)) write('aColor', next.color);
@@ -1256,6 +1297,7 @@ class NebulaEngine {
 
   applyPreset(preset: NebulaPreset, emotion: EmotionVector | null, immediate = false): void {
     const shapeChanged = preset.id !== this.shapeId;
+    const wasIdle = this.shapeId === 'galaxy_idle';
     this.preset = preset;
     this.emotion = emotion;
     this.shapeId = preset.id;
@@ -1267,8 +1309,9 @@ class NebulaEngine {
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
-    // 待机 M31 是盘状星系，暗尘埃带靠"极暗粒子 + 该区域不投亮粒子"形成，铺一层云气会糊掉暗带；
-    // 所以只有情绪星体才让云气淡入。
+    this.glowTarget = preset.id === 'galaxy_idle' ? 0.13 : 0;
+    this.surfaceTarget = preset.id === 'galaxy_idle' ? 0.16 : 0;
+    // 待机 M31 是盘状星系（暗尘埃带靠"极暗粒子"形成），铺一层云气会糊掉暗带；只给情绪星体云气
     this.cloudTarget = preset.id === 'galaxy_idle' ? 0 : 1;
     // Bloom 能量涌动：只上浮当前值，目标值不动，随后指数回落到预设值
     if (!immediate) this.bloomKick = Math.min(this.bloomKick + BLOOM_KICK, BLOOM_KICK_MAX);
@@ -1286,6 +1329,19 @@ class NebulaEngine {
     this.camDistTarget = preset.camera.dist;
     this.userCam = false;
 
+    // 从待机大星系出发：先望住盘中对应那座情绪星巢，随形变把视线收回原点
+    const nest = wasIdle && shapeChanged ? idleNestFor(preset.id) : undefined;
+    if (nest) {
+      this.focusBase = [nest.center[0], nest.center[1], nest.center[2]];
+      this.focusArm = nest.arm;
+      this.focusTarget.copy(this.focusCurrentFromArm(0));
+      this.focusCurrent.copy(this.focusTarget);
+    } else {
+      this.focusBase = null;
+      this.focusTarget.set(0, 0, 0);
+      this.focusCurrent.set(0, 0, 0);
+    }
+
     if (immediate) {
       this.bloomCurrent = this.bloomTarget;
       this.sizeCurrent = this.sizeTarget;
@@ -1301,8 +1357,6 @@ class NebulaEngine {
 
     if (shapeChanged) {
       this.beginMorph(buildShape(preset.id, this.count));
-      // 换星体：对应星座重新"描"一遍（与 2.8s 星际潜入同节奏）
-      this.constDraw = 0.05;
     }
 
     this.container.style.setProperty('--nebula-bg', preset.bg);
@@ -1424,7 +1478,6 @@ class NebulaEngine {
     this.composer.setSize(w, h);
     this.bloom.setSize(w, h);
     this.vignette.uniforms.uAspect.value = w / h;
-    this.film.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
     this.uniforms.uViewHeight.value = h;
     if (this.constellationMaterial) {
@@ -1441,7 +1494,7 @@ class NebulaEngine {
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     this.userCam = true;
-    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 5, 24);
+    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 6.6, 10.2);
     this.camDistTarget = this.camDist;
   };
 
@@ -1565,7 +1618,7 @@ class NebulaEngine {
       return;
     }
     const key = e.key.toLowerCase();
-    // C：切换「星图模式」（星座连线全部显现）
+    // C：切换「星图模式」（星座连线 + 中文名一起显隐）
     if (key === 'c') {
       e.preventDefault();
       this.onToggleStarchart?.();
@@ -1645,7 +1698,7 @@ class NebulaEngine {
     // 粒子尺寸：基线 × treble 细节脉动（高频点亮星点），整体体量再随 bass 涨缩；低落时略收
     const sizeGroove =
       this.sizeCurrent * (1 + this.grooveTreble * 0.22) * (1 + this.grooveBass * 0.12) * (1 - (1 - this.grooveBass) * 0.05);
-    this.uniforms.uSize.value = sizeGroove * PARTICLE_SIZE_BOOST;
+    this.uniforms.uSize.value = sizeGroove;
 
     this.uniformColors.forEach((c, idx) => {
       c.lerp(this.targetColors[idx] ?? c, 1 - Math.exp(-3.2 * dt));
@@ -1658,16 +1711,21 @@ class NebulaEngine {
     this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
+    // 盘面累计自转角：与着色器里绕 Y 轴的 t * omega 同步（待机形态 shear = 0，逐粒子一致）
+    this.spinAngle += this.behaviorCurrent.x * dt;
+
     // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
     if (this.morphActive) {
       this.morphProgress = Math.min(1, this.morphProgress + dt / MORPH_DURATION);
       this.transitionSwirl = SWIRL_AMP * Math.sin(Math.PI * this.morphProgress);
       this.uniforms.uMorphProgress.value = this.morphProgress;
       this.uniforms.uTransitionSwirl.value = this.transitionSwirl;
+      this.uniforms.uMorphFade.value = 1 - 0.7 * Math.sin(Math.PI * this.morphProgress);
       if (this.morphProgress >= 1) this.finalizeMorph();
     } else if (this.transitionSwirl !== 0) {
       this.transitionSwirl = 0;
       this.uniforms.uTransitionSwirl.value = 0;
+      this.uniforms.uMorphFade.value = 1;
     }
 
     // 指针
@@ -1719,12 +1777,35 @@ class NebulaEngine {
     );
     this.camera.lookAt(0, 0, 0);
 
-    // 天球（星野 + 星座连线）整体缓慢自转
-    this.sky.rotation.y += dt * 0.004;
-    this.starMaterial.uniforms.uTime.value = t;
-    this.starMaterial.uniforms.uOpacity.value = 0.72 + this.grooveBass * 0.3;
+// 潜入：形变前半段把视线钉在目标星巢上，随后收回原点，权重随形变进度退坡
+    if (this.focusBase) {
+      const rotated = this.focusCurrentFromArm(0);
+      this.focusTarget.copy(rotated);
+    }
 
-    // 星座连线：当前情绪的星座最亮；星图模式下全部显现；其余只留一点存在感
+    this.focusWeight = this.morphActive
+      ? 1 - smoothstep01(0.04, 0.62, this.morphProgress)
+      : 0;
+    this.lookAtPoint.copy(this.focusCurrent).multiplyScalar(this.focusWeight);
+    this.camera.lookAt(this.lookAtPoint);
+
+    // 推镜时轻微收一点视角，制造被「吸进去」的呼吸感
+    const fov = 55 - 5 * Math.sin(Math.PI * this.morphProgress);
+    if (Math.abs(this.camera.fov - fov) > 0.02) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+
+    // 背景星野：缓慢微旋 + 错相位闪烁；整体明度随 bass 呼吸（uOpacity 才真的生效，opacity 属性对自定义着色器无效）
+    this.starfield.rotation.y += dt * 0.004;
+    this.starfieldNear.rotation.y -= dt * 0.011;
+    this.starMaterial.uniforms.uTime.value = t;
+    this.starMaterial.uniforms.uOpacity.value = 0.9 + this.grooveBass * 0.25;
+
+    // 天球组（星座连线 + 中文名）与远端星野同速自转
+    this.sky.rotation.y += dt * 0.004;
+
+    // 星座连线：平时完全透明，只有星图模式才出现；当前情绪的星座更亮一档
     if (this.constellationMesh) {
       this.constDraw = THREE.MathUtils.damp(this.constDraw, 1, 1.7, dt);
       this.constellationMaterial.uniforms.uDraw.value = this.constDraw;
@@ -1735,7 +1816,6 @@ class NebulaEngine {
       for (let i = 0; i < CONSTELLATIONS.length; i++) {
         const c = CONSTELLATIONS[i];
         const isActive = c.id === activeConst;
-        // 平时完全不画连线（用户要求"平时不要抢戏"），只有星图模式才出现
         const target = !this.starchart
           ? CONST_ALPHA_IDLE
           : isActive
@@ -1758,7 +1838,7 @@ class NebulaEngine {
       alphaAttr.needsUpdate = true;
     }
 
-    // 云气层：按预设淡入淡出；时间 / 潮汐 / 低频一起喂进去
+    // 云气层：按预设淡入淡出（待机大星系不加，免得糊掉尘埃带）
     this.cloudOpacity = THREE.MathUtils.damp(this.cloudOpacity, this.cloudTarget, CLOUD_DAMP, dt);
     this.cloud.visible = this.cloudOpacity > 0.002;
     if (this.cloud.visible) {
@@ -1768,25 +1848,47 @@ class NebulaEngine {
       this.cloudMaterial.uniforms.uOpacity.value = this.cloudOpacity;
     }
 
-    // 胶片层：颗粒常驻；超新星冲击波（uShockAmp）驱动径向扭曲与额外色差
-    this.film.uniforms.uTime.value = t;
-    this.film.uniforms.uShock.value = Math.min(1, this.uniforms.uShockAmp.value * 0.8);
-
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）；潮汐高潮核心额外胀大
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
-    // 核心：低频呼吸 + 潮汐高潮额外胀大；基础亮度沿用 dev 的压暗值
-    this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6 + energy * 0.25) * (0.3 + coreK * 0.8));
-    coreMat.opacity = (0.05 + bands.bass * 0.1 + energy * 0.06) * coreK;
+const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
+    this.coreSprite.scale.set(
+      corePulse * (0.3 + coreK * 0.8) * 1.5,
+      corePulse * (0.3 + coreK * 0.8),
+      1,
+    );
+    coreMat.opacity = (0.08 + bands.bass * 0.12 + energy * 0.04) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
-    // Bloom：bass 托起辉光体量，mid 拓宽辉光范围；整体高潮涨起、低落沉下减光，
-    // 并随潮汐呼吸明暗（高潮璀璨泛光、低落压暗至深空微光）
-    const lift = this.grooveBass * 0.3 + this.grooveMid * 0.16;
-    this.bloom.strength = (this.bloomCurrent * 0.58 + lift) * (0.7 + energy * 0.45) + this.bloomKick;
+    // 盘面柔光：只在大星系待机时出现，随形变淡出
+    this.glowCurrent = THREE.MathUtils.damp(this.glowCurrent, this.glowTarget, 3.0, dt);
+    const glowMat = this.diskGlow.material as THREE.SpriteMaterial;
+    glowMat.opacity = this.glowCurrent + bands.bass * 0.015;
 
-    // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开（整体已提亮，暗角收一档）
-    this.vignette.uniforms.uAmount.value = 0.28 + this.grooveBass * 0.1;
+    // 底纹：morph 期间淡出，平时跟星系一起自转
+    const surfaceFade = 1 - Math.min(1, Math.max(0, (this.morphProgress - 0.0) / 0.55));
+    this.surfaceCurrent = THREE.MathUtils.damp(
+      this.surfaceCurrent,
+      this.surfaceTarget * surfaceFade,
+      3.4,
+      dt,
+    );
+    const surfaceMat = (this.diskSurface.children[0] as THREE.Mesh)
+      .material as THREE.MeshBasicMaterial;
+    surfaceMat.opacity = this.surfaceCurrent;
+    this.diskSurface.rotation.y = this.spinAngle;
+    glowMat.color.copy(this.uniformColors[2]);
+
+    // Bloom：bass 托起辉光体量、mid 拓宽辉光范围，潮汐高潮涨起、低落略减光；
+    // 形变中段粒子会穿过圆心堆叠，压一压 bloom 避免糊成一团白球
+    const lift = this.grooveBass * 0.3 + this.grooveMid * 0.16;
+    this.bloom.strength =
+      (this.bloomCurrent * 0.9 + bands.bass * 0.9 + lift * 0.4 + this.bloomKick) *
+      (0.94 + energy * 0.12);
+    if (this.morphActive) this.bloom.strength *= 1 - 0.55 * Math.sin(Math.PI * this.morphProgress);
+
+    // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
+    this.vignette.uniforms.uAmount.value = 0.3 + this.grooveBass * 0.12;
 
     // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢压暗（沿相机距离方向缩放粒子群）
     const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.06;
@@ -1827,12 +1929,12 @@ class NebulaEngine {
       if (
         this.warmup > 3 &&
         this.lowFpsStreak >= 3 &&
-        this.count > 8000 &&
+        this.count > 14000 &&
         !this.morphActive &&
         !this.downgraded
       ) {
         this.downgraded = true;
-        this.applyCount(8000);
+        this.applyCount(14000);
       }
       this.fpsAccum = 0;
       this.fpsFrames = 0;
@@ -1869,20 +1971,26 @@ class NebulaEngine {
     this.resizeObserver?.disconnect();
     this.points.geometry.dispose();
     this.starfield.geometry.dispose();
+    this.starfieldNear.geometry.dispose();
     this.starMaterial.dispose();
+    this.material.dispose();
+    this.coreSprite.material.dispose();
+    this.diskGlow.material.dispose();
+    const surfaceMesh = this.diskSurface.children[0] as THREE.Mesh;
+    surfaceMesh.geometry.dispose();
+    (surfaceMesh.material as THREE.MeshBasicMaterial).map?.dispose();
+    (surfaceMesh.material as THREE.MeshBasicMaterial).dispose();
     this.constellationMesh.geometry.dispose();
     this.constellationMaterial.dispose();
+    this.constellationStars.geometry.dispose();
     for (const sprite of this.labels) {
       (sprite.material as THREE.SpriteMaterial).map?.dispose();
       (sprite.material as THREE.SpriteMaterial).dispose();
     }
     this.labels = [];
-    this.material.dispose();
-    this.coreSprite.material.dispose();
     this.cloud.geometry.dispose();
     this.cloudMaterial.dispose();
     this.cloudTexture.dispose();
-    this.film.material.dispose();
     this.texture.dispose();
     this.composer.dispose();
     this.renderer.dispose();
@@ -1904,8 +2012,13 @@ export const NebulaCanvas = forwardRef<NebulaCanvasHandle, Props>(function Nebul
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
-    const engine = new NebulaEngine(el, preset, emotion, (s) => onStatsRef.current?.(s), starchart, () =>
-      onToggleRef.current?.(),
+    const engine = new NebulaEngine(
+      el,
+      preset,
+      emotion,
+      (s) => onStatsRef.current?.(s),
+      starchart,
+      () => onToggleRef.current?.(),
     );
     engineRef.current = engine;
     return () => {

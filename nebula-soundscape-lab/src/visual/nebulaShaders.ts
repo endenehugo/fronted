@@ -101,11 +101,14 @@ attribute float aRandom;          // 错峰飞行种子 0~1
 attribute vec3  aColor;           // 逐顶点颜色（待机星系的多色层次）
 attribute float aColorW;          // 顶点色权重：1 → aColor，0 → colorT 渐变
 attribute float aTargetColorW;    // 目标顶点色权重
-attribute float aShape;           // 粒子形状：0 圆点 / 1 四芒星 / 2 细光条（固有属性，形变不插值）
+attribute float aArm;             // 悬臂序号：0 = 非悬臂，1~6 = 六条情绪悬臂
+// 注意：粒子的「形状」不再占用顶点属性 —— 顶点属性已接近 WebGL 的 16 个上限
+// （position + 13 个自有属性 + aArm），所以形状改为在着色器里由 aSeed 与 colorT 推导。
 
 uniform float uTime;
 uniform float uMorphProgress;     // 0.0 → 1.0
 uniform float uTransitionSwirl;   // 潮汐旋涡强度（CPU 按形变进度驱动，两端归零）
+uniform float uMorphFade;         // 形变中段的整体淡出，避免粒子穿过圆心时堆成白球
 uniform vec4  uBehavior;          // x 自转 / y 径向脉冲 / z 垂直升腾 / w 湍流强度
 uniform float uShear;             // 开普勒差速强度
 
@@ -117,8 +120,6 @@ uniform float uSpinPhase;         // 自转积分角（CPU 逐帧累加 dt × �
 uniform float uCollapse;
 uniform float uShockRadius;
 uniform float uShockAmp;
-uniform vec3  uPointer;
-uniform float uPointerStrength;
 uniform vec3  uBurstPos;
 uniform float uBurstAmp;
 uniform float uPixelRatio;
@@ -175,6 +176,12 @@ void main() {
   //     页面开得越久转得越快。角速度随潮汐能量与中频在约 2.5 倍范围内起伏：高潮加速、低落近乎静止。
   base.xz = rot2(base.xz, uSpinPhase * (1.0 + uShear * role / (0.35 + r)));
 
+  // 2.1b 六条情绪悬臂各自的差速自转：每条臂一个转速，臂与臂之间缓慢错开；
+  //      形变一开始就收束回统一转速，避免过渡期被甩出去。
+  float armFade = 1.0 - smoothstep(0.0, 0.22, uMorphProgress);
+  float armId = aArm;
+  base.xz = rot2(base.xz, t * armId * 0.011 * armFade);
+
   // 2.2 径向脉冲（随低频能量呼吸）
   float pulse = uBehavior.y * uBass * (0.55 + 0.45 * sin(t * 3.4 + aSeed * 6.2831));
   base *= 1.0 + pulse;
@@ -209,21 +216,15 @@ void main() {
   float wave = exp(-pow((dc - uShockRadius) / 0.8, 2.0)) * uShockAmp;
   base += normalize(base + vec3(0.0001)) * wave * 1.5;
 
-  // 指针局部引力旋涡
-  vec3 toP = uPointer - base;
-  float pd = length(toP);
-  float infl = smoothstep(3.2, 0.0, pd) * uPointerStrength;
-  vec3 pdir = toP / max(pd, 0.0001);
-  vec3 tang = normalize(cross(vec3(0.0, 1.0, 0.0), pdir) + vec3(0.0001));
-  base += (pdir * 0.55 + tang * 0.95) * infl * (0.45 + 0.75 * role);
-
   // 键盘星簇光脉冲
   float bd = length(base - uBurstPos);
   float burst = exp(-bd * bd * 0.55) * uBurstAmp;
 
   // ================= 4. 投影与尺寸 =================
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
-  vShape = aShape;
+  // 形状推导（不占顶点属性）：核心极少数粒子给四芒星、外晕极少数给细光条，其余保持圆点。
+  // aSeed 是每颗粒子的固有随机数，colorT 是内外圈梯度，二者组合出来的分布稳定且不需要额外缓冲。
+  vShape = (colorT < 0.36 && aSeed < 0.11) ? 1.0 : ((colorT > 0.55 && aSeed > 0.82) ? 2.0 : 0.0);
 
   // 深度线索：远处粒子更暗更小，近处粒子淡出（推近镜头时不会糊成一屏大光斑）。
   // 加色混合没有前后遮挡，只能靠这两条渐隐制造体积感；下限取 0.62，避免外缘被压得看不见。
@@ -252,14 +253,14 @@ void main() {
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
   vColor = mix(grad, aColor, colorW);
 
-  // 基础亮度沿用 dev 的压薄压淡取值；潮汐明暗呼吸在其上叠加（高潮略亮、低落压暗到深空微光）
-  vGlow = (1.0 - colorT) * 0.26
-        + role * 0.08
-        + uBass * 0.22 * (1.0 - colorT)
-        + burst * 1.8
-        + wave * 1.0
-        + (uEnergy - 0.5) * 0.22;
-  vAlpha = (0.18 + 0.58 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2)
+// 基础亮度用 main 上调后的取值；再叠加视深渐隐（远处更暗、近处淡出）
+  vGlow = (1.0 - colorT) * 0.4
+        + role * 0.12
+        + uBass * 0.35 * (1.0 - colorT)
+        + burst * 2.4
+        + wave * 1.4
+        + (uEnergy - 0.5) * 0.18;
+  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade * uMorphFade * (0.94 + uEnergy * 0.12)
          * mix(0.62, 1.0, depthFade) * nearFade;
 }
 `;
@@ -278,8 +279,8 @@ void main() {
   vec4 tex = texture2D(uMap, gl_PointCoord);
   vec2 uv = gl_PointCoord - 0.5;
   float d = length(uv) * 2.0;
-  // 圆点：高斯核
-  float disc = tex.a * exp(-d * d * 2.4);
+// 核更紧、边缘更快收：粒子之间才看得见「点」，整片不会糊成雾（main 调过的高斯核）
+  float disc = tex.a * exp(-d * d * 4.5);
 
   float mask = disc;
   float gain = 1.0;
@@ -298,8 +299,7 @@ void main() {
   }
 
   float a = mask * vAlpha;
-  // 基色提到 0.42（原 0.30）：ACES 会压中间调，粒子本体需要更足的亮度垫底
-  vec3 c = vColor * (0.42 + vGlow * 0.72) * gain;
+  vec3 c = vColor * (0.4 + vGlow * 0.62) * gain;
   gl_FragColor = vec4(c, a);
 }
 `;
@@ -325,10 +325,12 @@ varying float vShape;
 
 void main() {
   vColor = aColor;
-  vShape = aShape;
-  vAlpha = 0.6 + 0.4 * sin(uTime * (0.35 + aSeed * 0.9) + aSeed * 40.0);
+vShape = aShape;
+  // 每颗星自己的呼吸节奏：相位错开、频率错开，三次幂让亮的是短促的一闪而不是缓慢起伏
+  float tw = pow(0.5 + 0.5 * sin(uTime * (0.9 + aSeed * 2.2) + aSeed * 44.0), 3.0);
+  vAlpha = 0.12 + 0.88 * tw;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z));
+  gl_PointSize = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z)) * (0.55 + 1.15 * tw);
   gl_Position = projectionMatrix * mv;
 }
 `;

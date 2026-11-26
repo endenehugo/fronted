@@ -1,4 +1,5 @@
 import type { PresetId } from '../types';
+import { getPreset } from './presets';
 
 /**
  * 纯数学点云生成器
@@ -11,6 +12,12 @@ import type { PresetId } from '../types';
 const TAU = Math.PI * 2;
 
 const gauss = (): number => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
+
+/** 0~1 的三次平滑阶跃，用来做软过渡 / 压暗包络 */
+const smooth01 = (t: number): number => {
+  const x = t < 0 ? 0 : t > 1 ? 1 : t;
+  return x * x * (3 - 2 * x);
+};
 
 export interface ShapeAttributes {
   /** 当前形态坐标 */
@@ -29,6 +36,8 @@ export interface ShapeAttributes {
   color: Float32Array;
   /** 顶点色权重 0~1：1 完全使用 aColor，0 使用 colorT 三段渐变 */
   colorW: Float32Array;
+  /** 悬臂序号 0~6（0 = 非悬臂，1~6 = 六条情绪悬臂），驱动各自的差速自转 */
+  arm: Float32Array;
 }
 
 type Builder = (count: number) => ShapeAttributes;
@@ -43,6 +52,7 @@ function alloc(count: number): ShapeAttributes {
     random: new Float32Array(count).fill(-1),
     color: new Float32Array(count * 3),
     colorW: new Float32Array(count),
+    arm: new Float32Array(count),
   };
 }
 
@@ -60,13 +70,13 @@ const buildSerenity: Builder = (count) => {
   // 蝶身（腰部）
   for (let k = 0; k < nBody; k++, i++) {
     const t = Math.random();
-    s.position[i * 3] = gauss() * 0.055;
-    s.position[i * 3 + 1] = gauss() * 0.06;
-    s.position[i * 3 + 2] = (t - 0.35) * 1.5;
-    s.size[i] = 0.5 + Math.random() * 0.7;
+    s.position[i * 3] = gauss() * 0.09;
+    s.position[i * 3 + 1] = gauss() * 0.11;
+    s.position[i * 3 + 2] = (t - 0.35) * 1.6;
+    s.size[i] = 0.32 + Math.random() * 0.4;
     s.seed[i] = Math.random();
     s.role[i] = 0.05;
-    s.colorT[i] = 0.08 + t * 0.22;
+    s.colorT[i] = 0.34 + t * 0.2;
   }
 
   // 双翼
@@ -434,12 +444,10 @@ const buildHealing: Builder = (count) => {
 };
 
 // ---------------------------------------------------------------- 0. 仙女座大星系（待机态）
-
 const rgb = (hex: string): [number, number, number] => {
-  const n = parseInt(hex.slice(1), 16);
+  const n = parseInt(hex.replace('#', ''), 16);
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 };
-
 const mix3 = (
   a: [number, number, number],
   b: [number, number, number],
@@ -450,55 +458,93 @@ const mix3 = (
   a[2] + (b[2] - a[2]) * t,
 ];
 
-const GALAXY_R = 3.4; // 主臂外缘半径
-const GALAXY_SCALE_LEN = 1.7; // 指数盘标长 h：面亮度沿半径按 exp(-r / h) 衰减
-const GALAXY_ARM_K = 2.9; // 对数螺旋松紧，越小缠得越紧
-const GALAXY_INCLINATION = 113 * (Math.PI / 180); // 盘面绕 X 轴倾角：投影长短轴 ≈ 2.6 : 1，近侧落在主轴下方
-const GALAXY_ROLL = 33 * (Math.PI / 180); // 屏面内滚转：主轴自左下向右上抬升 33°
-const GALAXY_CORE_A = rgb('#FFFDF5'); // 暖白
-const GALAXY_CORE_B = rgb('#F3C88B'); // 淡金
-const GALAXY_DUST = rgb('#B87D56'); // 暖褐 / 玫瑰金尘埃带
-const GALAXY_ARM_A = rgb('#6B7FD7'); // 薰衣草蓝
-const GALAXY_ARM_B = rgb('#9D7AD2'); // 蓝紫
-const GALAXY_NODE = rgb('#E05688'); // 洋红星结
-const DWARF_WHITE = rgb('#FFFFFF');
-const DWARF_VIOLET_A = rgb('#C9B8F0');
-const DWARF_VIOLET_B = rgb('#9D7AD2');
+const GALAXY_R = 4.0; // 星云外缘
+const GALAXY_SCALE_LEN = 2.05; // 面亮度标长
+const GALAXY_ARM_K = 2.25; // 六条悬臂的对数螺旋松紧
+const GALAXY_ARM0 = 0.55; // 悬臂起始半径
 
-const scale3 = (c: [number, number, number], k: number): [number, number, number] => [
-  c[0] * k,
-  c[1] * k,
-  c[2] * k,
+const GALAXY_CORE_A = rgb('#FFFDF5');
+const GALAXY_CORE_B = rgb('#F4D09A');
+const CLOUD_WARM = rgb('#FFF4E2');
+const CLOUD_MID = rgb('#D4DEFF');
+const CLOUD_COOL = rgb('#7488E8');
+
+/** 六条悬臂，一条对应一种情绪 */
+const ARM_COUNT = 6;
+const ARM_R_IN = 0.7;
+const ARM_R_OUT = 3.95;
+
+const NEST_ORDER: PresetId[] = [
+  'serenity',
+  'euphoria',
+  'melancholy',
+  'focus',
+  'catharsis',
+  'healing',
 ];
-const smooth01 = (x: number): number => {
-  const v = Math.min(1, Math.max(0, x));
-  return v * v * (3 - 2 * v);
+
+const armPhase = (i: number): number => (i * TAU) / ARM_COUNT;
+const armAngleAt = (i: number, r: number): number =>
+  armPhase(i) + GALAXY_ARM_K * Math.log(r / GALAXY_ARM0);
+
+export interface IdleNest {
+  /** 对应情绪预设 id（不会是 galaxy_idle） */
+  id: PresetId;
+  /** 悬臂上用于取景的锚点（未旋转坐标系） */
+  center: [number, number, number];
+  /** 悬臂锚点处的视觉半径 */
+  radius: number;
+  /** 悬臂序号 0~5，用于各自的转速 */
+  arm: number;
+}
+
+/** 取景锚点半径：六条悬臂中段 */
+const NEST_RADIUS = 2.3;
+
+export const IDLE_NESTS: IdleNest[] = NEST_ORDER.map((id, i) => {
+  const a = armAngleAt(i, NEST_RADIUS);
+  return {
+    id,
+    center: [Math.cos(a) * NEST_RADIUS, 0, Math.sin(a) * NEST_RADIUS],
+    radius: 0.66,
+    arm: i,
+  };
+});
+
+export function idleNestFor(id: string): IdleNest | undefined {
+  return IDLE_NESTS.find((n) => n.id === id);
+}
+
+const nestPalette = (id: PresetId): [number, number, number][] => {
+  const p = getPreset(id);
+  return [rgb(p.colors[0]), rgb(p.colors[1]), rgb(p.colors[2])];
 };
 
-/**
- * 待机态仙女座大星系（对照 M31 实拍）：22% 椭球核球 + 68% 指数盘（双对数螺旋主臂、
- * 紧贴主臂内侧的暗尘埃带、臂间盘与外晕）+ 10% 双伴星系（M32 紧凑亮白 / M110 弥散淡紫）。
- * 盘面先按倾角压扁、再在屏面内滚转 33°，得到左低右高的斜向椭圆旋涡姿态；
- * 近侧盘面落在主轴下方，暗尘埃带即位于核球下沿（与参考照一致）。
- * 尘埃带用「极暗粒子 + 排除亮粒子」在加色混合下形成暗区。
- * 粒子按「离星系中心的半径」写入错峰种子 random：核球先启航、外缘与伴星系后汇入。
- */
+const grad3 = (
+  pal: [number, number, number][],
+  t: number,
+): [number, number, number] => {
+  const u = Math.min(1, Math.max(0, t));
+  return u < 0.5 ? mix3(pal[0], pal[1], u * 2) : mix3(pal[1], pal[2], (u - 0.5) * 2);
+};
+
+const scale3 = (
+  c: [number, number, number],
+  k: number,
+): [number, number, number] => [c[0] * k, c[1] * k, c[2] * k];
+
 const buildGalaxy: Builder = (count) => {
   const s = alloc(count);
-  const nBulge = Math.floor(count * 0.22);
-  const nCompanion = Math.floor(count * 0.1);
-  const nCompact = Math.floor(nCompanion * 0.4);
-  const cy = Math.cos(GALAXY_INCLINATION);
-  const sy = Math.sin(GALAXY_INCLINATION);
-  const cr = Math.cos(GALAXY_ROLL);
-  const sr = Math.sin(GALAXY_ROLL);
-  /** 盘面局部坐标 (x, y 为盘面内，z 为盘厚) → 世界坐标（≈ 屏幕坐标） */
-  const tilt = (x: number, y: number, z: number): [number, number, number] => {
-    const y1 = y * cy - z * sy;
-    const z1 = y * sy + z * cy;
-    return [x * cr - y1 * sr, x * sr + y1 * cr, z1];
-  };
-  const put = (
+
+  const nCore = Math.floor(count * 0.05);
+  const nArms = Math.floor(count * 0.28);
+  const nFog = Math.floor(count * 0.035);
+  const nNest = Math.floor(count * 0.12);
+  const nLink = Math.floor(count * 0.05);
+  const nCloud = count - nCore - nArms - nFog - nNest - nLink;
+  const perArm = Math.floor(nArms / ARM_COUNT);
+
+  const write = (
     i: number,
     p: [number, number, number],
     size: number,
@@ -506,7 +552,8 @@ const buildGalaxy: Builder = (count) => {
     colorT: number,
     role: number,
     random: number,
-  ): void => {
+    arm: number,
+  ) => {
     s.position[i * 3] = p[0];
     s.position[i * 3 + 1] = p[1];
     s.position[i * 3 + 2] = p[2];
@@ -514,139 +561,177 @@ const buildGalaxy: Builder = (count) => {
     s.seed[i] = Math.random();
     s.role[i] = role;
     s.colorT[i] = colorT;
-    s.random[i] = Math.min(1, Math.max(0, random));
+    s.random[i] = random;
     s.color[i * 3] = color[0];
     s.color[i * 3 + 1] = color[1];
     s.color[i * 3 + 2] = color[2];
     s.colorW[i] = 1;
+    s.arm[i] = arm;
   };
-  /** 单位球面均匀随机方向 */
+
   const dir = (): [number, number, number] => {
     const u = Math.random() * 2 - 1;
     const ph = Math.random() * TAU;
     const st = Math.sqrt(1 - u * u);
     return [st * Math.cos(ph), u, st * Math.sin(ph)];
   };
-  /** 指数盘半径采样：Σ(r) ∝ exp(-r / h) */
-  const diskR = (): number => {
-    const u = Math.random();
-    const r = -GALAXY_SCALE_LEN * Math.log(1 - u * (1 - Math.exp(-GALAXY_R / GALAXY_SCALE_LEN)));
-    return Math.max(0.3, r);
-  };
 
   let i = 0;
 
-  // 22% 核球：扁椭球，向中心高度集中；两成是大而暗的粒子，构成柔和的眩光包络
-  for (let k = 0; k < nBulge; k++, i++) {
+  // ---- 核：只有一层极淡的暖雾，中心不留亮光
+  for (let k = 0; k < nCore; k++, i++) {
     const u = Math.pow(Math.random(), 0.85);
     const d = dir();
-    const p = tilt(d[0] * 0.55 * u, d[1] * 0.55 * u, d[2] * 0.36 * u);
-    const haze = Math.random() < 0.15;
-    put(
+    const rr = 0.95 * u;
+    const haze = Math.random() < 0.06;
+    const core = u < 0.16;
+    write(
       i,
-      p,
-      haze ? 0.9 + Math.random() * 0.6 : 0.26 + Math.random() * 0.3,
-      scale3(
-        mix3(GALAXY_CORE_A, GALAXY_CORE_B, Math.pow(u, 0.8) * (0.6 + Math.random() * 0.4)),
-        haze ? 0.2 : 0.5,
-      ),
-      0.02 + u * 0.1 + Math.random() * 0.05,
-      0.05,
-      u * 0.3,
+      [d[0] * rr * 1.25, d[1] * rr * 0.5, d[2] * rr],
+      haze ? 0.9 + Math.random() * 0.7 : core ? 0.4 + Math.random() * 0.3 : 0.2 + Math.random() * 0.2,
+      scale3(mix3(GALAXY_CORE_A, GALAXY_CORE_B, Math.pow(u, 0.75)), 0.1 + 0.16 * (1 - u)),
+      0.04,
+      haze ? 0.05 : 0.1,
+      0.05 + u * 0.3,
+      0,
     );
   }
 
-  // 68% 指数盘：58% 双主臂 / 12% 暗尘埃带 / 30% 臂间盘与外晕
-  const nArm = count - nBulge - nCompanion;
-  for (let k = 0; k < nArm; k++, i++) {
-    const r = diskR();
-    const t = r / GALAXY_R;
-    const armAng = (k % 2) * Math.PI + GALAXY_ARM_K * Math.log(r / 0.3);
-    const kind = Math.random();
-    const onArm = kind < 0.5;
-    const dust = !onArm && kind < 0.62 && r > 0.55 && r < 2.7;
-    let ang: number;
-    let thick: number;
-    if (dust) {
-      ang = armAng - 0.26 + gauss() * 0.045; // 紧贴主臂内侧
-      thick = 0.025 + 0.03 * t;
-    } else if (onArm) {
-      ang = armAng + gauss() * (0.22 + 0.16 * t);
-      thick = 0.03 + 0.04 * t;
-    } else {
-      ang = Math.random() * TAU;
-      thick = 0.05 + 0.07 * t;
-    }
-    const halo = !dust && !onArm && Math.random() < 0.2;
-    const rr = r + gauss() * (0.05 + 0.06 * t) + (halo ? Math.random() * 0.5 : 0);
-    const p = tilt(rr * Math.cos(ang), rr * Math.sin(ang), gauss() * (halo ? 0.3 : thick));
+  // ---- 星云主体：一整片填满的白色星云带，没有旋臂结构，
+  //      只靠角向低频扰动长出一层层的丝絮，避免糊成一团均匀的白。
+  for (let k = 0; k < nCloud; k++, i++) {
+    const r = 0.32 + 3.55 * Math.pow(Math.random(), 0.62);
+    const t = Math.min(1, r / GALAXY_R);
+    const ang = Math.random() * TAU;
+    const thick = 0.05 + 0.26 * (1 - t * 0.7);
 
-    const node = onArm && t > 0.45 && Math.random() < 0.03; // 洋红恒星形成节点
-    const haze = !node && Math.random() < 0.5; // 大而暗的弥散粒子，铺出连续的盘面光
-    // 径向色带：核周暖白 → 中盘暖褐 → 外盘蓝紫
-    const warm = mix3(GALAXY_CORE_A, GALAXY_DUST, smooth01((t - 0.04) / 0.4));
-    const cool = mix3(GALAXY_ARM_A, GALAXY_ARM_B, Math.random() * 0.5);
-    let c = mix3(warm, cool, smooth01((t - 0.28) / 0.45));
-    let bright = 1;
-    if (dust) bright = 0.1;
-    else if (halo) bright = 0.32;
-    else if (!onArm) bright = 0.85 - 0.35 * t;
-    else bright = 1 - 0.25 * t;
-    if (haze) bright *= 0.45;
-    if (node) c = GALAXY_NODE;
-    put(
+    // 丝絮：两段不同频率的角向调制 + 径向起伏
+    const fil =
+      Math.sin(ang * 3.0 + r * 4.2) * 0.5 + Math.sin(ang * 7.0 - r * 2.4 + 1.7) * 0.30;
+
+    const dens = Math.exp(-r / GALAXY_SCALE_LEN);
+    const bright = (0.20 + 0.34 * fil) * (0.35 + 1.05 * dens) * 0.62;
+    const warm = Math.exp(-r / 1.15);
+
+    write(
       i,
-      p,
-      node ? 0.8 + Math.random() * 0.5 : haze ? 1.2 + Math.random() * 1.2 : 0.28 + Math.random() * 0.42,
-      scale3(c, bright),
-      node ? 0.08 : dust ? 0.6 : 0.12 + t * 0.55,
-      0.2 + t * 0.5,
-      Math.min(1, 0.3 + t * 0.45 + (Math.random() - 0.5) * 0.1),
+      [
+        Math.cos(ang) * r + gauss() * 0.035,
+        gauss() * thick,
+        Math.sin(ang) * r + gauss() * 0.035,
+      ],
+      0.42 + Math.random() * 0.62,
+      scale3(mix3(mix3(CLOUD_COOL, CLOUD_MID, 0.55), CLOUD_WARM, warm), Math.max(0.18, bright)),
+      0.12 + 0.2 * t,
+      0.06,
+      Math.random(),
+      0,
     );
   }
 
-  // 10% 双伴星系（世界坐标定位，与参考照一致）
-  const rotD = 30 * (Math.PI / 180);
-  for (let k = 0; k < nCompanion; k++, i++) {
-    const compact = k < nCompact;
-    const d = dir();
-    const u = Math.pow(Math.random(), compact ? 1.2 : 1);
-    const haze = Math.random() < 0.3;
-    let p: [number, number, number];
-    let c: [number, number, number];
-    if (compact) {
-      // M32：核球左侧、叠在盘面近缘上的紧凑亮白矮星系
-      p = [-1.55 + d[0] * 0.15 * u, 0.1 + d[1] * 0.11 * u, 0.5 + d[2] * 0.12 * u];
-      c = scale3(mix3(DWARF_WHITE, GALAXY_CORE_B, u * 0.5), haze ? 0.35 : 0.9 + (1 - u) * 0.4);
-    } else {
-      // M110：右下方远离盘面的弥散淡紫椭圆矮星系，长轴顺主轴方向倾斜 30°
-      const lx = d[0] * 0.6 * u;
-      const ly = d[1] * 0.24 * u;
-      p = [
-        1.95 + lx * Math.cos(rotD) - ly * Math.sin(rotD),
-        -2.1 + lx * Math.sin(rotD) + ly * Math.cos(rotD),
-        -0.3 + d[2] * 0.16 * u,
-      ];
-      c = scale3(mix3(DWARF_VIOLET_A, DWARF_VIOLET_B, u), (haze ? 0.25 : 0.55) * (1.3 - u * 0.6));
-    }
-    put(
+  // ---- 大颗粒柔光：把点云之间的缝补上，让星云带看起来是连续的
+  for (let k = 0; k < nFog; k++, i++) {
+    const r = 0.4 + 3.35 * Math.random();
+    const t = Math.min(1, r / GALAXY_R);
+    const ang = Math.random() * TAU;
+    const warm = Math.exp(-r / 1.3);
+    write(
       i,
-      p,
-      haze
-        ? 0.9 + Math.random() * 0.7
-        : compact
-          ? 0.4 + Math.random() * 0.4
-          : 0.28 + Math.random() * 0.3,
-      c,
-      compact ? 0.05 + Math.random() * 0.15 : 0.3 + Math.random() * 0.3,
-      compact ? 0.05 : 0.15,
-      0.85 + Math.random() * 0.15,
+      [Math.cos(ang) * r, gauss() * (0.08 + 0.14 * (1 - t)), Math.sin(ang) * r],
+      1.15 + Math.random() * 0.9,
+      scale3(mix3(CLOUD_COOL, CLOUD_WARM, warm), 0.035 + Math.random() * 0.025),
+      0.15,
+      0.02,
+      Math.random(),
+      0,
     );
+  }
+
+  // ---- 六颗情绪星云：紧实的发光团，落在自己那条悬臂的随机位置上，随悬臂一起差速自转
+  {
+    const perNest = Math.floor(nNest / ARM_COUNT);
+    for (let a = 0; a < ARM_COUNT; a++) {
+      const pal = nestPalette(NEST_ORDER[a]);
+      const nestR = 1.0 + Math.random() * 1.7;
+      const nestAng = armAngleAt(a, nestR) + gauss() * 0.03;
+      const cx = Math.cos(nestAng) * nestR;
+      const cz = Math.sin(nestAng) * nestR;
+      const per = Math.min(perNest, count - i);
+      for (let j = 0; j < per; j++, i++) {
+        // 越靠核心越密越亮：外层稀薄，内层是一颗小白核
+        const u = Math.pow(Math.random(), 0.55);
+        const d = dir();
+        const rr = 0.66 * u;
+        const inner = u < 0.22;
+        const bright = (inner ? 2.0 : 0.85) * (0.75 + Math.random() * 0.7);
+        write(
+          i,
+          [cx + d[0] * rr * 1.35, d[1] * rr * 0.55, cz + d[2] * rr * 1.1],
+          inner ? 0.85 + Math.random() * 0.5 : 0.34 + Math.random() * 0.4,
+          scale3(mix3(pal[0], pal[1], Math.random() * 0.5), bright),
+          0.08,
+          0.5,
+          Math.random(),
+          a + 1,
+        );
+      }
+    }
+  }
+
+  // ---- 对称悬臂之间的连接云：把 a 与 a+3 两条臂接成一片，整团才像一个星云
+  for (let k = 0; k < nLink; k++, i++) {
+    const a = k % ARM_COUNT;
+    const partner = (a + 3) % ARM_COUNT;
+    const r = 0.7 + Math.random() * 2.6;
+    const angA = armAngleAt(a, r);
+    const angB = armAngleAt(partner, r);
+    const ang = angA + (angB - angA) * Math.random() + gauss() * 0.26;
+    const rr = r + gauss() * 0.26;
+    const c = mix3(nestPalette(NEST_ORDER[a])[0], nestPalette(NEST_ORDER[partner])[0], Math.random() * 0.6);
+    write(
+      i,
+      [Math.cos(ang) * rr, gauss() * (0.06 + 0.16 * (1 - r / GALAXY_R)), Math.sin(ang) * rr],
+      0.9 + Math.random() * 0.8,
+      scale3(c, 0.08 + Math.random() * 0.09),
+      0.16,
+      0.03,
+      Math.random(),
+      0,
+    );
+  }
+
+  // ---- 六条悬臂：每条单独一色、单独转速（aArm 驱动的差速自转）
+  for (let a = 0; a < ARM_COUNT; a++) {
+    const pal = nestPalette(NEST_ORDER[a]);
+    const per = Math.min(perArm, count - i);
+    for (let k = 0; k < per; k++, i++) {
+      const rr = ARM_R_IN + Math.pow(Math.random(), 0.85) * (ARM_R_OUT - ARM_R_IN);
+      const tn = rr / GALAXY_R;
+      const wide = Math.random() < 0.7 ? 0.07 + 0.05 * tn : 0.26 + 0.24 * tn;
+      const ang = armAngleAt(a, rr) + gauss() * wide;
+      const knot = Math.random() < 0.06;
+      const c = mix3(pal[0], pal[1], Math.random() * 0.55);
+      const bright = (knot ? 2.0 : 1.15 + 0.95 * (1 - tn)) * (0.85 + Math.random() * 0.45);
+
+      write(
+        i,
+        [
+          Math.cos(ang) * rr + gauss() * 0.03,
+          gauss() * (0.04 + 0.1 * (1 - tn)),
+          Math.sin(ang) * rr + gauss() * 0.03,
+        ],
+        knot ? 1.1 + Math.random() * 0.9 : wide > 0.2 ? 0.85 + Math.random() * 0.75 : 0.42 + Math.random() * 0.46,
+        scale3(c, bright),
+        0.1 + 0.25 * tn,
+        knot ? 0.35 : 0.18,
+        0.15 + (k / Math.max(1, per)) * 0.6,
+        a + 1,
+      );
+    }
   }
 
   return s;
 };
-
 // ---------------------------------------------------------------- 入口
 
 const BUILDERS: Record<PresetId, Builder> = {
