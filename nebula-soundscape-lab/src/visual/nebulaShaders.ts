@@ -241,9 +241,10 @@ void main() {
     * mix(0.78, 1.0, depthFade);
   // 四芒星要更大的点面积才撑得开星芒
   if (vShape > 0.5 && vShape < 1.5) sizePx *= 1.7;
-  // 34.0 是 900px 视高下的经验系数，按视高归一后大小与分辨率无关；同时夹住移动端 GPU 的点尺寸上限
+  // 34.0 是 900px 视高下的经验系数，按视高归一后大小与分辨率无关；
+  // 下限抬到 1.7 像素：低于两个像素的点片会被光栅化成一颗硬点，整片星云就会"闪白点"
   float pxScale = 34.0 * (uViewHeight / 900.0);
-  gl_PointSize = clamp(sizePx * pxScale / depth, 0.6, 160.0);
+  gl_PointSize = clamp(sizePx * pxScale / depth, 1.7 * uPixelRatio, 160.0);
   // 带形状的星（四芒 / 光条）至少留 4 个像素：太小时星芒会被光栅化成一个硬点
   if (vShape > 0.5) gl_PointSize = max(gl_PointSize, 4.0 * uPixelRatio);
   vSize = gl_PointSize;
