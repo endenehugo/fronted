@@ -109,6 +109,19 @@ input[type='range']::-moz-range-thumb {
   background: #ffffff;
 }
 
+/* 配色滑块：轨道透明，露出元素自身的紫 → 金渐变底色 */
+input.range-spectrum::-webkit-slider-runnable-track {
+  height: 6px;
+  background: transparent;
+}
+input.range-spectrum::-webkit-slider-thumb {
+  margin-top: -2.5px;
+}
+input.range-spectrum::-moz-range-track {
+  height: 6px;
+  background: transparent;
+}
+
 ::selection {
   background: rgba(255, 255, 255, 0.25);
 }

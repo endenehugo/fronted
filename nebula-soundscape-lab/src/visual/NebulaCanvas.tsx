@@ -90,6 +90,13 @@ const smoothstep01 = (e0: number, e1: number, x: number): number => {
   return t * t * (3 - 2 * t);
 };
 
+/** 配色滑块紫端的相对亮度下限（相对金端）：滑块只换颜色，两端亮度基本一致且都保持明亮 */
+const SPECTRUM_BRIGHTNESS = 0.8;
+
+/** 相对亮度（THREE.Color 的分量已处于线性工作空间，直接加权即可） */
+const relLuminance = (c: THREE.Color): number =>
+  0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
 /** 程序化径向高斯贴图，消除方形锯齿 */
 function createParticleTexture(size = 128): THREE.CanvasTexture {
   const c = document.createElement('canvas');
@@ -189,7 +196,7 @@ class NebulaEngine {
   private morphProgress = 0;
   private transitionSwirl = 0;
 
-  // 效价滑块：只改配色、不动几何；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
+  // 配色滑块：只改色相/饱和度、不动几何与明暗；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
   private valenceMix: number | null = null;
   /** 配色锁定源：'preset' 跟随预设/解析，'valence' 被滑块手动锁定 */
   private colorSource: 'preset' | 'valence' = 'preset';
@@ -644,8 +651,9 @@ class NebulaEngine {
   }
 
   /**
-   * 效价滑块：mix ∈ [-1,1]，-1 锚定深思/低落配色，1 锚定狂喜/明亮配色。
-   * 只在两端调色板间渐变，几何形状保持当前预设不变；传 null 关闭，回到当前预设/解析配色。
+   * 配色滑块：mix ∈ [-1,1]，-1 锚定深思的紫色，1 锚定狂喜的金色。
+   * 只在两端调色板之间改色相与饱和度，明度固定在金色的亮端（不改变星体亮暗、始终保持较亮），
+   * 几何形状保持当前预设不变；传 null 关闭，回到当前预设/解析配色。
    */
   setValenceMix(mix: number | null): void {
     if (mix === null) {
@@ -660,16 +668,39 @@ class NebulaEngine {
     this.applyValenceColors();
   }
 
-  /** 按当前 valenceMix 在两端调色板间插值配色（不触碰任何几何缓冲） */
+  /**
+   * 在紫 / 金两端调色板间插值色相与饱和度；明度按相对亮度反求解，使紫端亮度不低于金端的 80%，
+   * 所以滑块只换颜色、不压暗星体（不触碰任何几何缓冲）。
+   */
   private applyValenceColors(): void {
     if (this.valenceMix === null) return;
-    const t = (this.valenceMix + 1) / 2; // 0 低落端 → 1 明亮端
-    const lowC = PRESET_MAP.melancholy.colors;
-    const highC = PRESET_MAP.euphoria.colors;
-    this.targetColors = lowC.map((hex, i) => {
-      const c0 = new THREE.Color(hex);
-      const c1 = new THREE.Color(highC[i]);
-      return c0.lerp(c1, t);
+    const t = (this.valenceMix + 1) / 2; // 0 紫端 → 1 金端
+    const purpleC = PRESET_MAP.melancholy.colors;
+    const goldC = PRESET_MAP.euphoria.colors;
+    const a = { h: 0, s: 0, l: 0 };
+    const b = { h: 0, s: 0, l: 0 };
+    this.targetColors = purpleC.map((hex, i) => {
+      new THREE.Color(hex).getHSL(a, THREE.SRGBColorSpace);
+      const gold = new THREE.Color(goldC[i]);
+      gold.getHSL(b, THREE.SRGBColorSpace);
+      // 色相沿色环最短弧线过渡，避免绕远路经过无关颜色
+      let dh = b.h - a.h;
+      if (dh > 0.5) dh -= 1;
+      else if (dh < -0.5) dh += 1;
+      const h = (a.h + dh * t + 1) % 1;
+      const s = a.s + (b.s - a.s) * t;
+      const yTarget = relLuminance(gold) * (SPECTRUM_BRIGHTNESS + (1 - SPECTRUM_BRIGHTNESS) * t);
+      // 亮度随 HSL 明度单调递增：二分求出达到目标亮度所需的明度
+      const c = new THREE.Color();
+      let lo = 0;
+      let hi = 1;
+      for (let k = 0; k < 18; k++) {
+        const mid = (lo + hi) / 2;
+        c.setHSL(h, s, mid, THREE.SRGBColorSpace);
+        if (relLuminance(c) < yTarget) lo = mid;
+        else hi = mid;
+      }
+      return c.setHSL(h, s, (lo + hi) / 2, THREE.SRGBColorSpace);
     });
   }
 
