@@ -163,7 +163,9 @@ export default function App() {
   // 灵感词胶囊：等同于输入该词并回车
   const handleInspire = useCallback(
     (word: string) => {
-      // 只按这个词解析、切到对应星体；不把词写进输入框（点预设不该改动用户正在输入的内容）
+      // 只按这个词解析、切到对应星体；不把词写进输入框（点预设不该改动用户正在输入的内容）。
+      // 同时把配色滑块复位到中心，等于「忽略上一次的配色调整」。
+      setValence(0);
       runAnalyze(word);
     },
     [runAnalyze],
@@ -179,7 +181,8 @@ export default function App() {
       setTurbulence(p.turbulence);
       setSpeed(p.speed);
       setLog(null);
-      // 切星体保留滑块位置（滑块是"相对当前星体的偏移"，换星体后继续生效）
+      // 点预设情绪 = 忽略之前的配色调整，滑块回中心（0 = 该星体原色）
+      setValence(0);
       audio.setPreset(p);
     },
     [audio],
@@ -193,6 +196,7 @@ export default function App() {
     setLog(null);
     setTurbulence(GALAXY_IDLE.turbulence);
     setSpeed(GALAXY_IDLE.speed);
+    setValence(0);
     audio.setPreset(GALAXY_IDLE);
   }, [audio]);
 
@@ -206,6 +210,7 @@ export default function App() {
     setEmotion(null);
     setPalette(null);
     setLog(null);
+    setValence(0);
     setTurbulence(preset.turbulence);
     setSpeed(preset.speed);
   }, [preset]);

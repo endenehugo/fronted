@@ -383,19 +383,23 @@ export default function ControlDock(props: Props) {
           </div>
         </div>
 
-        {/* 配色滑块：紫 ↔ 金，只改颜色，形状与亮暗不变 */}
+        {/* 配色滑块：紫 ↔ 金，只改颜色，形状与亮暗不变；中心是初始点（= 星体原色） */}
         <div className="mt-2 flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
           <span className="shrink-0 text-[11px] text-white/45">紫</span>
-          <input
-            type="range"
-            min={-100}
-            max={100}
-            value={Math.round(valenceValue * 100)}
-            onChange={(e) => onValence(Number(e.target.value) / 100)}
-            className="range-spectrum h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
-            style={{ background: 'linear-gradient(90deg, #7B2CBF, #C77DFF 35%, #FF9F1C)' }}
-            aria-label="配色滑块：紫色至金色"
-          />
+          <div className="relative flex-1">
+            <input
+              type="range"
+              min={-100}
+              max={100}
+              value={Math.round(valenceValue * 100)}
+              onChange={(e) => onValence(Number(e.target.value) / 100)}
+              className="range-spectrum h-1.5 w-full cursor-pointer appearance-none rounded-full"
+              style={{ background: 'linear-gradient(90deg, #7B2CBF, #C77DFF 35%, #FF9F1C)' }}
+              aria-label="配色滑块：紫色至金色，中心为星体原色"
+            />
+            {/* 中心刻度：标出"初始点"的位置，点预设情绪后会回到这里 */}
+            <span className="pointer-events-none absolute left-1/2 top-1/2 h-3 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/45" />
+          </div>
           <span className="shrink-0 text-[11px] text-white/45">金</span>
           <span className="hidden w-10 shrink-0 text-right font-mono text-[10px] text-white/35 sm:inline">
             {Math.abs(valenceValue) < 0.02 ? '原色' : `${valenceValue > 0 ? '+' : ''}${valenceValue.toFixed(1)}`}
