@@ -24,6 +24,9 @@ function lzwCompress(input: string): string {
       w = wc;
     } else {
       codes.push(dict.get(w)!);
+      // 码位用 String.fromCharCode 承载，超过 0xFFFF 会被回绕成别的字符（解压出乱码）。
+      // 词典涨到上限时直接抛错，让 encodeState 回退成明文 Base64 —— 结果是链接变长，但内容正确。
+      if (dictSize >= 0xffff) throw new Error('LZW: dictionary overflow');
       dict.set(wc, dictSize++);
       w = ch;
     }

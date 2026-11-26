@@ -326,6 +326,10 @@ export class NebulaAudioEngine {
       const now = this.ctx.currentTime;
       const bpm = this.preset.bpm;
       const step = 60 / bpm / 2; // 八分音符
+      // 后台标签页会把 setInterval 节流到 1 次/秒甚至更慢，nextNoteTime 会严重落后。
+      // 不丢弃积压的话，切回来那一瞬间 while 会把几十步一次性排出去（playNote 里
+      // t = max(when, currentTime) 全塞到当前时刻）→ 一阵密集琶音。这里直接跳到当前时间。
+      if (this.nextNoteTime < now - 0.2) this.nextNoteTime = now + 0.05;
       while (this.nextNoteTime < now + 0.35) {
         this.scheduleStep(this.nextNoteTime, step);
         this.nextNoteTime += step;

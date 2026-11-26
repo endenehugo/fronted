@@ -165,7 +165,6 @@ type ModifierType = 'neg' | 'int' | 'dim';
 
 const MODIFIERS: { key: string; type: ModifierType; weight: number }[] = [
   { key: '并不是', type: 'neg', weight: 1 },
-  { key: '并不是', type: 'neg', weight: 1 },
   { key: '不太', type: 'dim', weight: 0.6 },
   { key: '不怎么', type: 'dim', weight: 0.5 },
   { key: '一点也', type: 'neg', weight: 1 },

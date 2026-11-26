@@ -240,7 +240,10 @@ export default function App() {
   const handleCapture = useCallback(async () => {
     if (busy) return;
     const img = canvasRef.current?.capture();
-    if (!img) return;
+    if (!img) {
+      setLog('画面还没准备好，稍等一下再定格');
+      return;
+    }
     setBusy(true);
     try {
       const url = await generatePostcard({
@@ -250,13 +253,17 @@ export default function App() {
         palette: palette ?? preset.colors,
         spectrum: audio.getSpectrum(64),
         timestamp: Date.now(),
+        scaleName,
       });
       setPostcardMood(input.trim());
       setPostcard(url);
+    } catch {
+      // 原来只有 finally，合成失败会变成未捕获的 rejection（用户只看到按钮闪一下）
+      setLog('明信片合成失败，请稍后再试');
     } finally {
       setBusy(false);
     }
-  }, [busy, input, preset, palette, audio]);
+  }, [busy, input, preset, palette, audio, scaleName]);
 
   const handleDownload = useCallback(() => {
     if (!postcard) return;

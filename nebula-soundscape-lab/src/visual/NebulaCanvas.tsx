@@ -1130,6 +1130,8 @@ class NebulaEngine {
    * 这样第一次切到某个星体也不会在形变起手那一帧卡住。
    */
   private warmShapes(): void {
+    // 移动端主线程与内存都紧张（7 套 20000 形态也要 ~7MB），不值得为省下 30ms 的首次切换去预热
+    if (isMobileDevice()) return;
     const ids: PresetId[] = [
       'galaxy_idle',
       'serenity',
@@ -1152,8 +1154,8 @@ class NebulaEngine {
       i += 1;
       if (i < ids.length) schedule(step);
     };
-    // 推迟到入场动画之后才开始预热，避免和首屏的奇点展开 / 首帧编译抢主线程
-    window.setTimeout(() => schedule(step), 1600);
+    // 等入场动画（奇点展开 ~2s）彻底结束再开始，别和首屏抢主线程
+    window.setTimeout(() => schedule(step), 4000);
   }
 
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
@@ -1179,6 +1181,11 @@ class NebulaEngine {
 
   private applyCount(n: number): void {
     this.count = n;
+    // 换了粒子数之后，旧数量的形态缓存就没用了（60000 的 7 套约 22MB）：
+    // 不释放的话，低帧率降级反而让内存更高
+    for (const key of Array.from(this.shapeCache.keys())) {
+      if (!key.endsWith(`:${n}`)) this.shapeCache.delete(key);
+    }
     const shape = this.shapeFor(this.shapeId, n);
     const geo = this.buildGeometry(n, shape);
     this.points.geometry.dispose();
@@ -1199,12 +1206,17 @@ class NebulaEngine {
     this.uniforms.uTransitionSwirl.value = 0;
   }
 
-  /** 悬臂锚点在当前时刻的位置（与着色器里的自转/差速公式一致） */
-  private focusCurrentFromArm(_unused: number): THREE.Vector3 {
+  /**
+   * 悬臂锚点在当前时刻的位置（与着色器里的自转 / 差速 / armFade 公式一致）。
+   * 注意必须带上 armFade：着色器里形变推进到 22% 后悬臂自转已经归零，
+   * CPU 侧若继续按 uTime 转，形变后半段 lookAt 的锚点会一直漂，镜头看着像被甩了一下。
+   */
+  private focusCurrentFromArm(): THREE.Vector3 {
     const base = this.focusBase;
     if (!base) return new THREE.Vector3();
+    const armFade = 1 - smoothstep01(0.0, 0.22, this.morphProgress);
     const a =
-      this.spinAngle + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value;
+      this.spinAngle + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value * armFade;
     return new THREE.Vector3(
       base[0] * Math.cos(a) - base[2] * Math.sin(a),
       base[1],
@@ -1375,7 +1387,7 @@ class NebulaEngine {
     if (nest) {
       this.focusBase = [nest.center[0], nest.center[1], nest.center[2]];
       this.focusArm = nest.arm;
-      this.focusTarget.copy(this.focusCurrentFromArm(0));
+      this.focusTarget.copy(this.focusCurrentFromArm());
       this.focusCurrent.copy(this.focusTarget);
     } else {
       this.focusBase = null;
@@ -1807,12 +1819,10 @@ class NebulaEngine {
       Math.cos(this.camPhi) * r,
       Math.sin(this.camPhi) * Math.sin(this.camTheta) * r,
     );
-    this.camera.lookAt(0, 0, 0);
-
-// 潜入：形变前半段把视线钉在目标星巢上，随后收回原点，权重随形变进度退坡
+    // 潜入：形变前半段把视线钉在目标星巢上，随后收回原点，权重随形变进度退坡。
+    // 只调用一次 lookAt（原来先 lookAt 原点、再 lookAt lookAtPoint，前一次是永久无效的死代码）
     if (this.focusBase) {
-      const rotated = this.focusCurrentFromArm(0);
-      this.focusTarget.copy(rotated);
+      this.focusTarget.copy(this.focusCurrentFromArm());
     }
 
     this.focusWeight = this.morphActive
