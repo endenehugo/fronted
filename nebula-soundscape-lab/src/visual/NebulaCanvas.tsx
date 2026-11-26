@@ -441,6 +441,9 @@ const ENERGY_DAMP_FALL = 1.7;
 /** 音频未就绪时的包络基线：画面保持中低位的静息呼吸，而非压到最暗 */
 const ENERGY_IDLE = 0.35;
 
+/** 形态缓存上限：一套 6 万粒子的属性数组约 4MB，7 个形态 × 两种粒子数会把内存吃穿 */
+const SHAPE_CACHE_LIMIT = 4;
+
 /**
  * 自转角速度的潮汐因子：ω = spin × (SPIN_BASE + energy × SPIN_ENERGY + mid × SPIN_MID)。
  * 待机包络 0.35 时约 0.49，潮汐高潮约 0.95 → 高低潮之间约 2 倍速差，整体保持缓慢漂移。
@@ -606,8 +609,7 @@ class NebulaEngine {
   private velTheta = 0;
   private velPhi = 0;
 
-  // 潜入运镜：盘面累计自转角 + 目标星巢的世界坐标
-  private spinAngle = 0;
+  // 潜入运镜：目标星巢的世界坐标（自转角统一用 spinPhase，与着色器共用同一基准）
   private focusTarget = new THREE.Vector3();
   private focusCurrent = new THREE.Vector3();
   /** 悬臂取景锚点（未旋转坐标）；null 表示回到原点取景 */
@@ -1119,9 +1121,19 @@ class NebulaEngine {
   private shapeFor(id: PresetId, count: number): ShapeAttributes {
     const key = `${id}:${count}`;
     const hit = this.shapeCache.get(key);
-    if (hit) return hit;
+    if (hit) {
+      // 命中即当作最近使用：挪到队尾，淘汰时从最早的开始
+      this.shapeCache.delete(key);
+      this.shapeCache.set(key, hit);
+      return hit;
+    }
     const made = buildShape(id, count);
     this.shapeCache.set(key, made);
+    while (this.shapeCache.size > SHAPE_CACHE_LIMIT) {
+      const oldest = this.shapeCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.shapeCache.delete(oldest);
+    }
     return made;
   }
 
@@ -1178,6 +1190,11 @@ class NebulaEngine {
 
   private applyCount(n: number): void {
     this.count = n;
+    // 降级换成新的粒子数后，旧 count 的缓存再也打不到，直接丢掉，
+    // 否则 60000 与 14000 两套快照会同时驻留，正是要省的内存。
+    for (const key of Array.from(this.shapeCache.keys())) {
+      if (!key.endsWith(`:${n}`)) this.shapeCache.delete(key);
+    }
     const shape = this.shapeFor(this.shapeId, n);
     const geo = this.buildGeometry(n, shape);
     this.points.geometry.dispose();
@@ -1203,7 +1220,7 @@ class NebulaEngine {
     const base = this.focusBase;
     if (!base) return new THREE.Vector3();
     const a =
-      this.spinAngle + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value;
+      this.spinPhase + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value;
     return new THREE.Vector3(
       base[0] * Math.cos(a) - base[2] * Math.sin(a),
       base[1],
@@ -1742,8 +1759,7 @@ class NebulaEngine {
     this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
-    // 盘面累计自转角：与着色器里绕 Y 轴的 t * omega 同步（待机形态 shear = 0，逐粒子一致）
-    this.spinAngle += this.behaviorCurrent.x * dt;
+    
 
     // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
     if (this.morphActive) {
@@ -1844,6 +1860,8 @@ class NebulaEngine {
       const alphaAttr = this.constellationMesh.geometry.getAttribute('aAlpha') as THREE.BufferAttribute;
       const alphaArr = alphaAttr.array as Float32Array;
       let vi = 0;
+      // 只有 alpha 真的在动才上传：稳定态下每帧重写整块缓冲是白给的带宽
+      let alphaChanged = false;
       for (let i = 0; i < CONSTELLATIONS.length; i++) {
         const c = CONSTELLATIONS[i];
         const isActive = c.id === activeConst;
@@ -1852,8 +1870,11 @@ class NebulaEngine {
           : isActive
             ? constActiveAlpha()
             : CONST_ALPHA_CHART;
-        this.constAlpha[i] = THREE.MathUtils.damp(this.constAlpha[i] ?? 0, target, 2.4, dt);
-        const a = this.constAlpha[i];
+        const prev = this.constAlpha[i] ?? 0;
+        const next = THREE.MathUtils.damp(prev, target, 2.4, dt);
+        this.constAlpha[i] = next;
+        if (Math.abs(next - prev) > 0.001) alphaChanged = true;
+        const a = next;
         const nv = c.edges.length * 4;
         for (let k = 0; k < nv; k++) alphaArr[vi + k] = a;
         vi += nv;
@@ -1866,7 +1887,7 @@ class NebulaEngine {
           sprite.visible = a > 0.012;
         }
       }
-      alphaAttr.needsUpdate = true;
+      if (alphaChanged) alphaAttr.needsUpdate = true;
     }
 
     // 云气层：按预设淡入淡出（待机大星系不加，免得糊掉尘埃带）
@@ -1907,7 +1928,9 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
     const surfaceMat = (this.diskSurface.children[0] as THREE.Mesh)
       .material as THREE.MeshBasicMaterial;
     surfaceMat.opacity = this.surfaceCurrent;
-    this.diskSurface.rotation.y = this.spinAngle;
+    // 底纹与粒子共用 spinPhase：此前用独立的恒定 spinAngle，能量/中频调制一介入
+    // 二者角速度就分叉，臂与底纹慢慢错位。
+    this.diskSurface.rotation.y = this.spinPhase;
     glowMat.color.copy(this.uniformColors[2]);
 
     // Bloom：bass 托起辉光体量、mid 拓宽辉光范围，潮汐高潮涨起、低落略减光；
