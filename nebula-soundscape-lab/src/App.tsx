@@ -18,15 +18,29 @@ interface Stats {
 }
 
 export default function App() {
+  /**
+   * 从 URL hash 读初始状态：必须在这里**同步**取。
+   *
+   * 以前是放在 useEffect 里还原，于是首帧先按 galaxy_idle 建好粒子形状，
+   * 等 effect 跑起来才切到 hash 里的星体 —— 用户看到的是「待机六臂星系正在变形到目标星体」
+   * 的中途状态，两套形态混在一起，就是「第一次进去星云是混乱的」。
+   */
+  const initialState = useMemo(() => readStateFromHash(), []);
+
   const [ignited, setIgnited] = useState(false);
   const [launched, setLaunched] = useState(false);
-  // 初始即为待机态：仙女座大星系
-  const [presetId, setPresetId] = useState<PresetId>(GALAXY_IDLE.id);
-  const [input, setInput] = useState('');
-  const [emotion, setEmotion] = useState<EmotionVector | null>(null);
-  const [palette, setPalette] = useState<Palette | null>(null);
-  const [turbulence, setTurbulence] = useState(GALAXY_IDLE.turbulence);
-  const [speed, setSpeed] = useState(GALAXY_IDLE.speed);
+  const [presetId, setPresetId] = useState<PresetId>(initialState?.presetId ?? GALAXY_IDLE.id);
+  const [input, setInput] = useState(initialState?.customText ?? '');
+  const [emotion, setEmotion] = useState<EmotionVector | null>(initialState?.emotion ?? null);
+  /**
+   * 配色只在「分享的是一段心情文本」时才恢复 hash 里的那份混合色。
+   * 单纯分享星体时用星体原色 —— 否则第二次进来形状对了、颜色却和星体对不上。
+   */
+  const [palette, setPalette] = useState<Palette | null>(
+    initialState?.emotion ? initialState.colors : null,
+  );
+  const [turbulence, setTurbulence] = useState(initialState?.turbulence ?? GALAXY_IDLE.turbulence);
+  const [speed, setSpeed] = useState(initialState?.speed ?? GALAXY_IDLE.speed);
   const [log, setLog] = useState<string | null>(null);
   const [postcard, setPostcard] = useState<string | null>(null);
   const [postcardMood, setPostcardMood] = useState('');
@@ -41,7 +55,7 @@ export default function App() {
   const [scaleOverride, setScaleOverride] = useState<ScaleId | null>(null);
 
   /** 配色滑块：相对当前星体配色的色相偏移，-1 偏紫 ↔ +1 偏金；0 = 星体原色（初始位置即"跟随"） */
-  const [valence, setValence] = useState<number>(0);
+  const [valence, setValence] = useState<number>(initialState?.valence ?? 0);
   /** 星图模式：所有星座连线一起显现（键盘 C 或底部按钮） */
   const [starchart, setStarchart] = useState(false);
 
@@ -60,19 +74,6 @@ export default function App() {
     audio.setTimbre(timbre);
     audio.setScale(scaleId);
   }, [audio, timbre, scaleId, audioLive]);
-
-  // ---- 启动时还原 URL Hash 状态 ----
-  useEffect(() => {
-    const state = readStateFromHash();
-    if (!state) return;
-    setPresetId(state.presetId);
-    setInput(state.customText);
-    setEmotion(state.emotion);
-    setPalette(state.colors);
-    setTurbulence(state.turbulence);
-    setSpeed(state.speed);
-    setValence(state.valence ?? 0);
-  }, []);
 
   // ---- 音频引擎状态指示 ----
   useEffect(() => {

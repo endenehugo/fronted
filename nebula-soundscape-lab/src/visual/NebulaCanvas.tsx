@@ -1152,7 +1152,8 @@ class NebulaEngine {
       i += 1;
       if (i < ids.length) schedule(step);
     };
-    schedule(step);
+    // 推迟到入场动画之后才开始预热，避免和首屏的奇点展开 / 首帧编译抢主线程
+    window.setTimeout(() => schedule(step), 1600);
   }
 
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
