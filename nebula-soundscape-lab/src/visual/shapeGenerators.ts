@@ -541,7 +541,7 @@ const buildGalaxy: Builder = (count) => {
   const nFog = Math.floor(count * 0.035);
   const nNest = Math.floor(count * 0.12);
   const nLink = Math.floor(count * 0.05);
-  const nBand = Math.floor(count * 0.08);
+  const nBand = Math.floor(count * 0.11);
   const nCloud = count - nCore - nArms - nFog - nNest - nLink - nBand;
   const perArm = Math.floor(nArms / ARM_COUNT);
 
@@ -666,8 +666,8 @@ const buildGalaxy: Builder = (count) => {
         gauss() * (0.05 + 0.12 * (1 - tn)),
         Math.sin(ang) * rr + gauss() * 0.05,
       ],
-      0.55 + Math.random() * 0.75,
-      scale3(mix3(CLOUD_WARM, CLOUD_MID, Math.random() * 0.7), 0.09 + bright * 0.1),
+      0.7 + Math.random() * 0.95,
+      scale3(mix3(CLOUD_WARM, CLOUD_MID, Math.random() * 0.7), 0.2 + bright * 0.24),
       0.26,
       0.04,
       Math.random(),
