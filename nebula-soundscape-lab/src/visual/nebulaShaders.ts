@@ -328,9 +328,13 @@ void main() {
 vShape = aShape;
   // 每颗星自己的呼吸节奏：相位错开、频率错开，三次幂让亮的是短促的一闪而不是缓慢起伏
   float tw = pow(0.5 + 0.5 * sin(uTime * (0.9 + aSeed * 2.2) + aSeed * 44.0), 3.0);
-  vAlpha = 0.12 + 0.88 * tw;
+  // 峰值不再打到全亮，闪的时候只是“亮一档”，不会白成一颗刺眼的光点
+  vAlpha = 0.10 + 0.5 * tw;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z)) * (0.55 + 1.15 * tw);
+  float basePx = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z));
+  // 尺寸随闪烁只轻微放大（0.9→1.2 倍），并给一个 2.2 像素的下限：
+  // 否则最暗时点片会缩到亚像素，被光栅化成一个硬邦邦的单像素点
+  gl_PointSize = clamp(basePx * (0.9 + 0.3 * tw), 2.2 * uPixelRatio, 48.0);
   gl_Position = projectionMatrix * mv;
 }
 `;
