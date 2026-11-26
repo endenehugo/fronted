@@ -648,28 +648,27 @@ const buildGalaxy: Builder = (count) => {
     );
   }
 
-  // ---- 悬臂之间的白色星云带：在每条悬臂与相邻悬臂的正中间铺一条白雾，
-  //      把六条臂之间的空档连成一片，整团看起来才是完整的一座大星云。
-  const bandMid = Math.PI / ARM_COUNT;
+  // ---- 白色环带：绕中心整整一圈的白色星云圆环，六条彩臂从中穿过，
+//      环的内外边缘做柔化，靠近臂的位置略微加浓，看起来像一条缠绕星系的白色带子。
   for (let k = 0; k < nBand; k++, i++) {
-    const a = k % ARM_COUNT;
-    const rr = ARM_R_IN * 0.85 + Math.pow(Math.random(), 0.8) * (ARM_R_OUT - ARM_R_IN * 0.85);
+    const ang = Math.random() * TAU;
+    const rr = 1.9 + Math.random() * 1.1;
     const tn = rr / GALAXY_R;
-    // 相邻两臂正中（臂相位 + 30°），带宽随半径略微变宽
-    const ang = armAngleAt(a, rr) + bandMid + gauss() * (0.13 + 0.11 * tn);
-    const dens = Math.exp(-rr / GALAXY_SCALE_LEN);
-    const bright = (0.48 + 0.62 * dens) * (0.6 + Math.random() * 0.5);
+    const edge = smooth01((rr - 1.6) / 0.42) * (1 - smooth01((rr - 2.86) / 0.42));
+    // 角向轻微起伏，避免看起来像画上去的几何圆
+    const ripple = 0.82 + 0.18 * Math.sin(ang * 5 + 1.3) + 0.08 * Math.sin(ang * 11 + 2.1);
+    const bright = (0.42 + 0.95 * edge) * ripple * (0.72 + Math.random() * 0.45);
     write(
       i,
       [
-        Math.cos(ang) * rr + gauss() * 0.05,
-        gauss() * (0.05 + 0.12 * (1 - tn)),
-        Math.sin(ang) * rr + gauss() * 0.05,
+        Math.cos(ang) * rr,
+        gauss() * (0.03 + 0.06 * (1 - tn)),
+        Math.sin(ang) * rr,
       ],
-      0.7 + Math.random() * 0.95,
-      scale3(mix3(CLOUD_WARM, CLOUD_MID, Math.random() * 0.7), 0.2 + bright * 0.24),
-      0.26,
-      0.04,
+      0.58 + Math.random() * 0.85,
+      scale3(mix3(CLOUD_WARM, [1, 1, 1], 0.55), 0.16 + bright * 0.4),
+      0.18,
+      0.06,
       Math.random(),
       0,
     );
