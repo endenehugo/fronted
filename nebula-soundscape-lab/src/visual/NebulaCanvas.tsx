@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import {
   cloudFragmentShader,
   cloudVertexShader,
@@ -16,6 +17,7 @@ import {
   nebulaVertexShader,
   starfieldFragmentShader,
   starfieldVertexShader,
+  FilmShader,
   VignetteShader,
 } from './nebulaShaders';
 import { createGalaxyTexture } from './galaxyTexture';
@@ -456,6 +458,18 @@ const SPIN_MID = 0.25;
 const BLOOM_KICK = 0.15;
 const BLOOM_KICK_MAX = 0.3;
 
+/**
+ * ACES 色彩管线总开关。
+ * 这段是 ba68d3d 引入、在合并提交 048f99c 里被整段吞掉的实现：
+ * 加色混合的粒子是真正的高动态范围画面，没有 tonemap 时高光直接剪成纯白、
+ * 中间调挤在暗部；缺 OutputPass 时 composer 里的线性色值还会被当 sRGB 直接上屏。
+ */
+const ACES_ENABLED = true;
+/** 全局曝光总开关：ACES 之后中间调的亮度基本由它决定，调这一个数即可整体提亮/压暗 */
+const EXPOSURE = 1.0;
+/** 胶片层（颗粒 + 色差 + 冲击波推挤）：必须排在 OutputPass 之后，作用在最终显示值上 */
+const FILM_ENABLED = true;
+
 /** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
 const smoothstep01 = (e0: number, e1: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -500,6 +514,7 @@ class NebulaEngine {
   private composer: EffectComposer;
   private bloom: UnrealBloomPass;
   private vignette: ShaderPass;
+  private film: ShaderPass | null = null;
   private points: THREE.Points;
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
@@ -674,6 +689,10 @@ class NebulaEngine {
       preserveDrawingBuffer: true, // 明信片导出必需
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    if (ACES_ENABLED) {
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      this.renderer.toneMappingExposure = EXPOSURE;
+    }
     this.renderer.setSize(w, h);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.domElement.style.width = '100%';
@@ -800,6 +819,15 @@ class NebulaEngine {
     this.vignette = new ShaderPass(VignetteShader);
     this.vignette.uniforms.uAspect.value = w / h;
     this.composer.addPass(this.vignette);
+    // 色彩管线终点：ACES 色调映射 + sRGB 编码。缺这一步，composer 里的线性色值会被当成
+    // sRGB 直接上屏 —— 设计稿里的配色显示不出来、暗部更暗、亮部剪白。
+    if (ACES_ENABLED) this.composer.addPass(new OutputPass());
+    // 胶片层放在 OutputPass 之后：颗粒与色差作用在最终显示值上，暗部不再被撒噪
+    if (FILM_ENABLED) {
+      this.film = new ShaderPass(FilmShader);
+      this.film.uniforms.uAspect.value = w / h;
+      this.composer.addPass(this.film);
+    }
 
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
@@ -1527,6 +1555,7 @@ class NebulaEngine {
     this.composer.setSize(w, h);
     this.bloom.setSize(w, h);
     this.vignette.uniforms.uAspect.value = w / h;
+    if (this.film) this.film.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
     this.uniforms.uViewHeight.value = h;
     if (this.constellationMaterial) {
@@ -1945,6 +1974,12 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
     // 暗角：高潮时四周压暗更强、中心更聚焦；低落时略微松开
     this.vignette.uniforms.uAmount.value = 0.3 + this.grooveBass * 0.12;
 
+    // 胶片层：冲击波瞬间的径向推挤最强，平时只有极轻的颗粒与边缘色差
+    if (this.film) {
+      this.film.uniforms.uTime.value = t;
+      this.film.uniforms.uShock.value = Math.min(1, this.uniforms.uShockAmp.value * 0.8);
+    }
+
     // 整体体量：bass 高涨时星云向外涨起，低落时向内收拢压暗（沿相机距离方向缩放粒子群）
     const bodyScale = 1 + this.grooveBass * 0.1 - (1 - this.grooveBass) * 0.06;
     this.points.scale.setScalar(bodyScale);
@@ -2047,6 +2082,7 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
     this.cloudMaterial.dispose();
     this.cloudTexture.dispose();
     this.texture.dispose();
+    this.film?.material.dispose();
     this.composer.dispose();
     this.renderer.dispose();
     if (el.parentElement === this.container) this.container.removeChild(el);
