@@ -542,7 +542,6 @@ class NebulaEngine {
   private raycaster = new THREE.Raycaster();
 
   private preset: NebulaPreset;
-  private emotion: EmotionVector | null;
   private shapeId: PresetId;
 
   private raf = 0;
@@ -664,7 +663,6 @@ class NebulaEngine {
   ) {
     this.container = container;
     this.preset = preset;
-    this.emotion = emotion;
     this.onStats = onStats;
     this.starchart = starchart;
     this.onToggleStarchart = onToggleStarchart;
@@ -743,7 +741,7 @@ class NebulaEngine {
     });
 
     const shape = this.shapeFor(preset.id, this.count);
-    this.points = new THREE.Points(this.buildGeometry(this.count, shape), this.material);
+    this.points = new THREE.Points(this.buildGeometry(shape), this.material);
     this.points.frustumCulled = false;
     this.scene.add(this.points);
 
@@ -1178,7 +1176,7 @@ class NebulaEngine {
     window.setTimeout(() => schedule(step), 4000);
   }
 
-  private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
+  private buildGeometry(shape: ShapeAttributes): THREE.BufferGeometry {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(shape.position.slice(), 3));
     geo.setAttribute('aTargetPosition', new THREE.BufferAttribute(shape.position.slice(), 3));
@@ -1207,7 +1205,7 @@ class NebulaEngine {
       if (!key.endsWith(`:${n}`)) this.shapeCache.delete(key);
     }
     const shape = this.shapeFor(this.shapeId, n);
-    const geo = this.buildGeometry(n, shape);
+    const geo = this.buildGeometry(shape);
     this.points.geometry.dispose();
     this.points.geometry = geo;
     if (this.morphArmTarget) {
@@ -1385,11 +1383,10 @@ class NebulaEngine {
 
   // -------------------------------------------------------------- 预设
 
-  applyPreset(preset: NebulaPreset, emotion: EmotionVector | null, immediate = false): void {
+  applyPreset(preset: NebulaPreset, _emotion: EmotionVector | null, immediate = false): void {
     const shapeChanged = preset.id !== this.shapeId;
     const wasIdle = this.shapeId === 'galaxy_idle';
     this.preset = preset;
-    this.emotion = emotion;
     this.shapeId = preset.id;
 
     // 基底色 = 预设自带调色板；滑块只在其上做色相偏移（所以切星体时滑块位置不需要重置）
@@ -1398,8 +1395,10 @@ class NebulaEngine {
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
-    this.glowTarget = preset.id === 'galaxy_idle' ? 0.13 : 0;
-    this.surfaceTarget = preset.id === 'galaxy_idle' ? 0.16 : 0;
+    // 待机星系的弥散辉光/盘面底纹：原来 0.13 / 0.16，是"白色雾状"的第二个来源，
+    // 盘面放大后更明显，压到 0.05 / 0.09，只做极淡的底衬
+    this.glowTarget = preset.id === 'galaxy_idle' ? 0.05 : 0;
+    this.surfaceTarget = preset.id === 'galaxy_idle' ? 0.09 : 0;
     // 待机 M31 是盘状星系（暗尘埃带靠"极暗粒子"形成），铺一层云气会糊掉暗带；只给情绪星体云气
     this.cloudTarget = preset.id === 'galaxy_idle' ? 0 : 1;
     // Bloom 能量涌动：只上浮当前值，目标值不动，随后指数回落到预设值
@@ -1574,7 +1573,7 @@ class NebulaEngine {
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     this.userCam = true;
-    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 6.6, 10.2);
+    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 6.6, 13.0);
     this.camDistTarget = this.camDist;
   };
 
@@ -2002,17 +2001,20 @@ const corePulse = 1.0 + bands.bass * 0.6 + energy * 0.2;
         tide: +bands.tide.toFixed(3),
         level: +bands.level.toFixed(3),
       });
-      this.lowFpsStreak = !throttled && fps < 42 ? this.lowFpsStreak + 1 : 0;
-      // 形变进行中不降级：重建几何会把粒子直接瞬移到目标形态，等落定后再降
+      this.lowFpsStreak = !throttled && fps < 32 ? this.lowFpsStreak + 1 : 0;
+      // 形变进行中不降级：重建几何会把粒子直接瞬移到目标形态，等落定后再降。
+      // 另外只在开场 6 秒内判定一次：原来阈值 42fps 且任何时候都判定，
+      // 用户看着画面时会突然从 60000 掉到 14000（少 77% 粒子）—— 观感上就是"突然变单调"。
       if (
         this.warmup > 3 &&
+        this.warmup < 6 &&
         this.lowFpsStreak >= 3 &&
-        this.count > 14000 &&
+        this.count > 38000 &&
         !this.morphActive &&
         !this.downgraded
       ) {
         this.downgraded = true;
-        this.applyCount(14000);
+        this.applyCount(38000);
       }
       this.fpsAccum = 0;
       this.fpsFrames = 0;

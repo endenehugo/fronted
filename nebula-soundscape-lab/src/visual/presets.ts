@@ -27,7 +27,9 @@ bloom: 1.0,
   description: '仙女座大星系 · 六条情绪悬臂，其间藏着六座情绪星巢',
   centroid: { valence: 0, arousal: 0, mystery: 0 },
   behavior: { spin: 0.035, pulse: 0.05, drift: 0, turbulence: 0.05 },
-  camera: { phi: 0.72, theta: 2.35, dist: 9.4 },
+  // 盘面半径从 4.0 放大到 5.2 后，机位相应退回（9.4 → 10.6）并把视角压平（phi 0.72 → 0.62），
+  // 否则星系会超出画面上下边缘
+  camera: { phi: 0.62, theta: 2.35, dist: 10.6 },
   shear: 0,
   core: 0.0,
 };

@@ -376,8 +376,13 @@ export default function App() {
         </div>
       )}
 
-{/* 底部控制栏：首屏就位，作为「潜入」的入口 */}
-      <ControlDock
+{/* 底部控制栏：首屏收起在屏幕下方，用户第一次交互（点进页面）后整条从下边界升起 */}
+      <div
+        className={`fixed inset-x-0 bottom-0 z-40 transition-[transform,opacity] duration-[700ms] ease-[cubic-bezier(0.16,1,0.3,1)] ${
+          launched ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-[130%] opacity-0'
+        }`}
+      >
+        <ControlDock
         mode={isIdle ? 'idle' : 'body'}
         preset={preset}
         inspirations={INSPIRATIONS}
@@ -404,7 +409,8 @@ export default function App() {
         onScale={handleScale}
         starchart={starchart}
         onStarchart={handleToggleStarchart}
-      />
+        />
+      </div>
 
       {/* 明信片弹窗 */}
       {postcard && (

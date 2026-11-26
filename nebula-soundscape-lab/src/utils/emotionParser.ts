@@ -441,17 +441,3 @@ function buildLog(preset: NebulaPreset, e: EmotionVector, matched: string[]): st
     e.arousal > 0.5 ? '极快' : e.arousal > 0.15 ? '轻快' : e.arousal > -0.15 ? '适中' : e.arousal > -0.5 ? '缓慢' : '近乎静止';
   return tpl.replace('{kw}', kw).replace('{note}', preset.scaleName).replace('{speed}', speedWord);
 }
-
-export function emptyResult(): EmotionResult {
-  const preset = nearestPreset({ valence: 0, arousal: 0, mystery: 0 });
-  return {
-    vector: { valence: 0, arousal: 0, mystery: 0 },
-    preset,
-    colors: preset.colors,
-    turbulence: preset.turbulence,
-    speed: preset.speed,
-    log: '',
-    matched: [],
-    intensity: 0,
-  };
-}

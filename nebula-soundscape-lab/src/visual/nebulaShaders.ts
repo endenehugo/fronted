@@ -140,6 +140,12 @@ vec2 rot2(vec2 p, float a) {
   return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
 }
 
+// 配色微调的两个总开关（只影响粒子自身颜色，不影响后处理）：
+//   SAT_GAIN    饱和度倍率，1.0 = 原样；1.18 让外圈尘带不再发灰
+//   BRIGHT_GAIN 亮度倍率，1.0 = 原样；1.12 整体提亮
+const float SAT_GAIN = 1.18;
+const float BRIGHT_GAIN = 1.12;
+
 void main() {
   float t = uTime;
 
@@ -188,7 +194,9 @@ void main() {
   base.xz = rot2(base.xz, armSway * armFade);
 
   // 2.2 径向脉冲（随低频能量呼吸）
-  float pulse = uBehavior.y * uBass * (0.55 + 0.45 * sin(t * 3.4 + aSeed * 6.2831));
+  // 呼吸脉冲：原来是 0.55 + 0.45·sin（振幅 0.45），低频一动整盘明暗跳变，
+// 加上十字星芒和 bloom 就变成"一炸一炸"。压到 0.85 + 0.15·sin，只留轻微起伏。
+  float pulse = uBehavior.y * uBass * (0.85 + 0.15 * sin(t * 3.4 + aSeed * 6.2831));
   base *= 1.0 + pulse;
 
   // 2.3 垂直升腾：每个粒子从自身基点缓慢上升并淡出（相位由种子错开，形态不被拉散）
@@ -229,7 +237,9 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(base, 1.0);
   // 形状推导（不占顶点属性）：核心极少数粒子给四芒星、外晕极少数给细光条，其余保持圆点。
   // aSeed 是每颗粒子的固有随机数，colorT 是内外圈梯度，二者组合出来的分布稳定且不需要额外缓冲。
-  vShape = (colorT < 0.36 && aSeed < 0.11) ? 1.0 : ((colorT > 0.55 && aSeed > 0.82) ? 2.0 : 0.0);
+  // 粒子形状：四芒星占比从 11% 降到 4%，细光条从 18% 降到 12%。
+  // 原来 11% 的亮点带十字星芒 + 1.7 倍点径，配 bloom 就在盘面上"炸"个不停。
+  vShape = (colorT < 0.36 && aSeed < 0.04) ? 1.0 : ((colorT > 0.55 && aSeed > 0.88) ? 2.0 : 0.0);
 
   // 深度线索：远处粒子更暗更小，近处粒子淡出（推近镜头时不会糊成一屏大光斑）。
   // 加色混合没有前后遮挡，只能靠这两条渐隐制造体积感；下限取 0.62，避免外缘被压得看不见。
@@ -244,10 +254,12 @@ void main() {
     * (0.85 + uEnergy * 0.30 + uTreble * 0.30 * role)
     * mix(0.78, 1.0, depthFade);
   // 四芒星要更大的点面积才撑得开星芒
-  if (vShape > 0.5 && vShape < 1.5) sizePx *= 1.7;
+  if (vShape > 0.5 && vShape < 1.5) sizePx *= 1.42;
   // 34.0 是 900px 视高下的经验系数，按视高归一后大小与分辨率无关；同时夹住移动端 GPU 的点尺寸上限
   float pxScale = 34.0 * (uViewHeight / 900.0);
-  gl_PointSize = clamp(sizePx * pxScale / depth, 0.6, 160.0);
+  // 下限从 0.6px 提到 1.35px：小于 1px 的点在加色混合下会变成逐帧闪烁的亚像素噪点，
+  // 外圈尤其明显（越远越小）。抬到 1.35 后外圈是"细密小点"而不是"脏噪点"。
+  gl_PointSize = clamp(sizePx * pxScale / depth, 1.35, 160.0);
   gl_Position = projectionMatrix * mv;
 
   // ================= 5. 颜色 =================
@@ -256,7 +268,11 @@ void main() {
     ? mix(uColors[0], uColors[1], colorT * 2.0)
     : mix(uColors[1], uColors[2], (colorT - 0.5) * 2.0);
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
-  vColor = mix(grad, aColor, colorW);
+  vec3 colBase = mix(grad, aColor, colorW);
+  // 饱和度 + 亮度：外圈尘带原本偏灰，这里按亮度做一次温和的饱和提升，
+  // 再整体抬 12% 亮度，避免"糊成一片灰"。
+  float baseLum = dot(colBase, vec3(0.299, 0.587, 0.114));
+  vColor = clamp(mix(vec3(baseLum), colBase, SAT_GAIN) * BRIGHT_GAIN, 0.0, 4.0);
 
 // 基础亮度用 main 上调后的取值；再叠加视深渐隐（远处更暗、近处淡出）
   vGlow = (1.0 - colorT) * 0.4
@@ -265,7 +281,9 @@ void main() {
         + burst * 2.4
         + wave * 1.4
         + (uEnergy - 0.5) * 0.18;
-  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade * uMorphFade * (0.94 + uEnergy * 0.12)
+  // 外圈（colorT→1）原本压到 0.57，显得又灰又暗：改成 0.34 + 0.66×(1-0.42·colorT)，
+  // 外圈升到 0.72，同时保留"内亮外淡"的层次。
+  vAlpha = (0.34 + 0.66 * (1.0 - colorT * 0.42)) * fade * uMorphFade * (0.94 + uEnergy * 0.12)
          * mix(0.62, 1.0, depthFade) * nearFade;
 }
 `;
@@ -294,8 +312,8 @@ void main() {
     // 四芒星：横竖两条高次幂窄带交叉，中心保留一点圆核，尖角自然收束
     float sx = pow(max(0.0, 1.0 - abs(uv.y) * 30.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.x) * 2.6), 1.5);
     float sy = pow(max(0.0, 1.0 - abs(uv.x) * 30.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.y) * 2.6), 1.5);
-    mask = disc * 0.28 + (sx + sy) * 1.7;
-    gain = 1.25;
+    mask = disc * 0.34 + (sx + sy) * 1.15;
+    gain = 1.12;
   } else if (vShape > 1.5) {
     // 细光条：沿 X 拉长的软线，像被潮汐扯开的气体丝
     float streak = exp(-uv.y * uv.y * 320.0) * exp(-abs(uv.x) * 2.0);
@@ -515,70 +533,3 @@ void main() {
 `;
 
 // ---------------------------------------------------------------- 胶片层（颗粒 / 色差 / 冲击波）
-
-/**
- * 最后一层：极轻的色差 + 亮度反相关颗粒 + 超新星径向冲击。
- * - 色差把边缘的红/蓝轻微错开，消除"数码感"；
- * - 颗粒只在中间调出现，纯暗区保持干净（否则整屏像蒙了噪点）；
- * - uShock 由 CPU 从冲击波振幅驱动（0~1），只在中环最强，中心不糊。
- */
-export const FilmShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uTime: { value: 0 },
-    uAspect: { value: 1 },
-    uShock: { value: 0 },
-    /** 颗粒极轻：只在中间调出现，纯暗区保持干净（否则整屏像蒙了噪点） */
-    uGrain: { value: 0.006 },
-    uCA: { value: 0.22 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    uniform float uAspect;
-    uniform float uShock;
-    uniform float uGrain;
-    uniform float uCA;
-
-    varying vec2 vUv;
-
-    float hash(vec2 p) {
-      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-    }
-
-    void main() {
-      vec2 uv = vUv;
-      vec2 c = uv - 0.5;
-      float r = length(vec2(c.x * uAspect, c.y));
-      vec2 dir = normalize(c + vec2(1e-5));
-
-      // 冲击波：径向推挤，中心弱、中环最强
-      float shock = uShock * exp(-pow(r - 0.35, 2.0) * 12.0);
-      uv += dir * shock * 0.03;
-
-      // 色差：越靠边缘越明显，爆发瞬间额外加强
-      float ca = (uCA + shock * 2.4) * (0.35 + r * 0.9);
-      vec3 col = vec3(
-        texture2D(tDiffuse, uv + dir * ca * 0.0016).r,
-        texture2D(tDiffuse, uv).g,
-        texture2D(tDiffuse, uv - dir * ca * 0.0016).b
-      );
-
-      // 颗粒：只作用于中间调（纯黑区不撒噪），幅度极轻，避免"脏"
-      float lum = dot(col, vec3(0.299, 0.587, 0.114));
-      float n = hash(floor(gl_FragCoord.xy) + floor(uTime * 60.0)) - 0.5;
-      float grainMask = smoothstep(0.04, 0.30, lum) * (1.0 - smoothstep(0.75, 1.0, lum));
-      col += n * uGrain * grainMask;
-
-      col *= 1.0 + shock * 0.10;
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `,
-};

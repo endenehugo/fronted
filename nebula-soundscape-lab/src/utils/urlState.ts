@@ -182,14 +182,6 @@ export function readStateFromHash(): NebulaState | null {
   return decodeState(payload);
 }
 
-export function clearStateHash(): void {
-  try {
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
-  } catch {
-    /* noop */
-  }
-}
-
 /** 生成当前状态的分享链接 */
 export function buildShareUrl(state: NebulaState): string {
   const payload = encodeState(state);
