@@ -829,6 +829,10 @@ class NebulaEngine {
       this.composer.addPass(this.film);
     }
 
+    // 后处理链的缓冲按设备像素初始化（与 onResize 保持一致）
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
+    this.composer.setSize(w, h);
+
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
     this.loop();
@@ -1551,8 +1555,10 @@ class NebulaEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    // composer 的内部缓冲要按设备像素算：只传 CSS 尺寸时，DPR>1 的屏幕上整条后处理链
+    // 都跑在半分辨率上，亮星经过低分辨率 bloom 再放大回来就是一块方块马赛克
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(w, h);
-    this.bloom.setSize(w, h);
     this.vignette.uniforms.uAspect.value = w / h;
     if (this.film) this.film.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
