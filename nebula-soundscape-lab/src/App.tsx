@@ -40,9 +40,6 @@ export default function App() {
   const [timbreOverride, setTimbreOverride] = useState<TimbreId | null>(null);
   const [scaleOverride, setScaleOverride] = useState<ScaleId | null>(null);
 
-  /** 效价滑块：-1 低落负向 ↔ 1 正向明亮；null 跟随文本解析结果 */
-  const [valence, setValence] = useState<number | null>(null);
-
   const canvasRef = useRef<NebulaCanvasHandle>(null);
   const audio = useMemo(() => NebulaAudioEngine.getInstance(), []);
   const preset = useMemo(() => getPreset(presetId), [presetId]);
@@ -68,7 +65,6 @@ export default function App() {
     setPalette(state.colors);
     setTurbulence(state.turbulence);
     setSpeed(state.speed);
-    setValence(state.valence);
   }, []);
 
   // ---- 音频引擎状态指示 ----
@@ -96,11 +92,10 @@ export default function App() {
         speed,
         seed: 1,
         emotion,
-        valence,
       });
     }, 600);
     return () => window.clearTimeout(timer);
-  }, [presetId, input, palette, turbulence, speed, emotion, valence, launched, preset.colors]);
+  }, [presetId, input, palette, turbulence, speed, emotion, launched, preset.colors]);
 
   // ---- 唤醒星云：解锁音频，从奇点展开为待机大星系 ----
   const handleLaunch = useCallback(async () => {
@@ -129,8 +124,6 @@ export default function App() {
       setTurbulence(res.turbulence);
       setSpeed(res.speed);
       setLog(res.log);
-      // 解析结果回填滑块效价轴；用户手动拖动后以滑块为准
-      setValence(res.vector.valence);
       audio.setPreset(res.preset);
     },
     [audio],
@@ -157,7 +150,6 @@ export default function App() {
       setTurbulence(p.turbulence);
       setSpeed(p.speed);
       setLog(null);
-      setValence(null);
       audio.setPreset(p);
     },
     [audio],
@@ -171,21 +163,14 @@ export default function App() {
     setLog(null);
     setTurbulence(GALAXY_IDLE.turbulence);
     setSpeed(GALAXY_IDLE.speed);
-    setValence(null);
     audio.setPreset(GALAXY_IDLE);
   }, [audio]);
-
-  // ---- 拖动效价滑块：手动覆盖情绪基调（-1 低落 ↔ 1 明亮） ----
-  const handleValence = useCallback((v: number) => {
-    setValence(Math.min(1, Math.max(-1, v)));
-  }, []);
 
   const handleClear = useCallback(() => {
     setInput('');
     setEmotion(null);
     setPalette(null);
     setLog(null);
-    setValence(null);
     setTurbulence(preset.turbulence);
     setSpeed(preset.speed);
   }, [preset]);
@@ -246,7 +231,6 @@ export default function App() {
       speed,
       seed: 1,
       emotion,
-      valence,
     });
     try {
       await navigator.clipboard.writeText(url);
@@ -266,7 +250,7 @@ export default function App() {
     }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2200);
-  }, [presetId, input, palette, turbulence, speed, emotion, valence, preset.colors]);
+  }, [presetId, input, palette, turbulence, speed, emotion, preset.colors]);
 
   const handleClosePostcard = useCallback(() => setPostcard(null), []);
 
@@ -280,7 +264,6 @@ export default function App() {
         palette={palette}
         turbulence={turbulence}
         speed={speed}
-        valence={valence}
         onStats={setStats}
       />
 
@@ -363,8 +346,6 @@ export default function App() {
           onChange={setInput}
           onSubmit={handleAnalyze}
           onClear={handleClear}
-          valence={valence}
-          onValence={handleValence}
           volume={volume}
           muted={muted}
           onVolume={handleVolume}

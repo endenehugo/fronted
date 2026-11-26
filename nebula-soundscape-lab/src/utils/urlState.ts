@@ -102,7 +102,6 @@ export function encodeState(state: NebulaState): string {
           Math.round(state.emotion.mystery * 1000) / 1000,
         ]
       : null,
-    vl: state.valence,
   });
   try {
     return toBase64Url(lzwCompress(json));
@@ -136,7 +135,6 @@ export function decodeState(payload: string): NebulaState | null {
         speed: Number.isFinite(obj.sp) ? Number(obj.sp) : preset.speed,
         seed: Number.isFinite(obj.sd) ? Number(obj.sd) : 1,
         emotion,
-        valence: typeof obj.vl === 'number' ? Math.min(1, Math.max(-1, obj.vl)) : null,
       };
     } catch {
       return null;
