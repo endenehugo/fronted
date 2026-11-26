@@ -460,13 +460,6 @@ const smoothstep01 = (e0: number, e1: number, x: number): number => {
   return t * t * (3 - 2 * t);
 };
 
-/** 配色滑块紫端的相对亮度下限（相对金端）：滑块只换颜色，两端亮度基本一致且都保持明亮 */
-const SPECTRUM_BRIGHTNESS = 0.8;
-
-/** 相对亮度（THREE.Color 的分量已处于线性工作空间，直接加权即可） */
-const relLuminance = (c: THREE.Color): number =>
-  0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-
 /** 程序化径向高斯贴图，消除方形锯齿 */
 function createParticleTexture(size = 128): THREE.CanvasTexture {
   const c = document.createElement('canvas');
@@ -592,10 +585,10 @@ class NebulaEngine {
   private morphArmTarget: Float32Array | null = null;
   private transitionSwirl = 0;
 
-  // 配色滑块：只改色相/饱和度、不动几何与明暗；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
+  // 配色滑块：相对当前星体配色的色相偏移，mix ∈ [-1,1]，0 = 星体原色
   private valenceMix: number | null = null;
-  /** 配色锁定源：'preset' 跟随预设/解析，'valence' 被滑块手动锁定 */
-  private colorSource: 'preset' | 'valence' = 'preset';
+  /** 当前基底调色板（预设色，或被心情解析覆写后的连续色） */
+  private baseColors: THREE.Color[] = [];
 
   // 相机
   private camTheta = 0.4;
@@ -1302,10 +1295,9 @@ class NebulaEngine {
     this.emotion = emotion;
     this.shapeId = preset.id;
 
-    // 滑块锁定配色时，预设切换/解析配色不覆盖它；否则以预设色为基底（解析色随后由 overrideColors 覆写）
-    if (this.colorSource !== 'valence') {
-      this.targetColors = preset.colors.map((c) => new THREE.Color(c));
-    }
+    // 基底色 = 预设自带调色板；滑块只在其上做色相偏移（所以切星体时滑块位置不需要重置）
+    this.baseColors = preset.colors.map((c) => new THREE.Color(c));
+    this.applyValenceColors();
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
@@ -1373,64 +1365,55 @@ class NebulaEngine {
     );
   }
 
-  /** 覆盖目标调色板（心情解析生成的连续色）；滑块锁定时不覆写 */
+  /** 覆盖目标调色板（心情解析生成的连续色）：只更新基底色，滑块偏移在其上叠加 */
   overrideColors(colors: THREE.Color[]): void {
-    if (colors.length === 3 && this.colorSource !== 'valence') {
-      this.targetColors = colors;
+    if (colors.length === 3) {
+      this.baseColors = colors.map((c) => c.clone());
+      this.applyValenceColors();
     }
   }
 
   /**
-   * 配色滑块：mix ∈ [-1,1]，-1 锚定深思的紫色，1 锚定狂喜的金色。
-   * 只在两端调色板之间改色相与饱和度，明度固定在金色的亮端（不改变星体亮暗、始终保持较亮），
-   * 几何形状保持当前预设不变；传 null 关闭，回到当前预设/解析配色。
+   * 配色滑块：mix ∈ [-1,1] 是「相对当前星体配色的偏移」，不是绝对值。
+   * - 0 = 星体原本的配色（所以初始位置天然正确，切星体也不会突变）；
+   * - 负值把色相往「深思」的紫端拉，正值往「狂喜」的金端拉，只动色相与饱和度；
+   * - 明度只做很小的整体偏移，保留 core→halo 的层次（不逐槽拉平）。
+   * 传 null 等价于 0。
    */
   setValenceMix(mix: number | null): void {
-    if (mix === null) {
-      this.valenceMix = null;
-      this.colorSource = 'preset';
-      // 关闭滑块：回到当前预设/解析配色
-      this.targetColors = this.preset.colors.map((c) => new THREE.Color(c));
-      return;
-    }
-    this.valenceMix = Math.min(1, Math.max(-1, mix));
-    this.colorSource = 'valence';
+    this.valenceMix = mix === null ? null : Math.min(1, Math.max(-1, mix));
     this.applyValenceColors();
   }
 
-  /**
-   * 在紫 / 金两端调色板间插值色相与饱和度；明度按相对亮度反求解，使紫端亮度不低于金端的 80%，
-   * 所以滑块只换颜色、不压暗星体（不触碰任何几何缓冲）。
-   */
+  /** 按当前 valenceMix 在「星体原色 → 紫/金端」之间做色相偏移（不触碰任何几何缓冲） */
   private applyValenceColors(): void {
-    if (this.valenceMix === null) return;
-    const t = (this.valenceMix + 1) / 2; // 0 紫端 → 1 金端
-    const purpleC = PRESET_MAP.melancholy.colors;
-    const goldC = PRESET_MAP.euphoria.colors;
-    const a = { h: 0, s: 0, l: 0 };
-    const b = { h: 0, s: 0, l: 0 };
-    this.targetColors = purpleC.map((hex, i) => {
-      new THREE.Color(hex).getHSL(a, THREE.SRGBColorSpace);
-      const gold = new THREE.Color(goldC[i]);
-      gold.getHSL(b, THREE.SRGBColorSpace);
-      // 色相沿色环最短弧线过渡，避免绕远路经过无关颜色
-      let dh = b.h - a.h;
+    const base =
+      this.baseColors.length === 3
+        ? this.baseColors
+        : this.preset.colors.map((c) => new THREE.Color(c));
+
+    if (this.valenceMix === null || Math.abs(this.valenceMix) < 0.02) {
+      this.targetColors = base.map((c) => c.clone());
+      return;
+    }
+
+    const mag = Math.abs(this.valenceMix);
+    const anchor =
+      this.valenceMix < 0 ? PRESET_MAP.melancholy.colors : PRESET_MAP.euphoria.colors;
+    const bh = { h: 0, s: 0, l: 0 };
+    const ah = { h: 0, s: 0, l: 0 };
+
+    this.targetColors = base.map((c, i) => {
+      c.getHSL(bh, THREE.SRGBColorSpace);
+      new THREE.Color(anchor[i]).getHSL(ah, THREE.SRGBColorSpace);
+      // 色相沿色环最短弧线偏移，避免绕远路经过无关颜色
+      let dh = ah.h - bh.h;
       if (dh > 0.5) dh -= 1;
       else if (dh < -0.5) dh += 1;
-      const h = (a.h + dh * t + 1) % 1;
-      const s = a.s + (b.s - a.s) * t;
-      const yTarget = relLuminance(gold) * (SPECTRUM_BRIGHTNESS + (1 - SPECTRUM_BRIGHTNESS) * t);
-      // 亮度随 HSL 明度单调递增：二分求出达到目标亮度所需的明度
-      const c = new THREE.Color();
-      let lo = 0;
-      let hi = 1;
-      for (let k = 0; k < 18; k++) {
-        const mid = (lo + hi) / 2;
-        c.setHSL(h, s, mid, THREE.SRGBColorSpace);
-        if (relLuminance(c) < yTarget) lo = mid;
-        else hi = mid;
-      }
-      return c.setHSL(h, s, (lo + hi) / 2, THREE.SRGBColorSpace);
+      const h = (bh.h + dh * mag * 0.8 + 1) % 1;
+      const s = Math.min(1, Math.max(0.05, bh.s + (ah.s - bh.s) * mag * 0.5));
+      const l = Math.min(0.95, Math.max(0.05, bh.l + (ah.l - bh.l) * mag * 0.12));
+      return new THREE.Color().setHSL(h, s, l, THREE.SRGBColorSpace);
     });
   }
 

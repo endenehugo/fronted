@@ -398,7 +398,7 @@ export default function ControlDock(props: Props) {
           />
           <span className="shrink-0 text-[11px] text-white/45">金</span>
           <span className="hidden w-10 shrink-0 text-right font-mono text-[10px] text-white/35 sm:inline">
-            {valence === null ? '跟随' : `${valenceValue > 0 ? '+' : ''}${valenceValue.toFixed(1)}`}
+            {Math.abs(valenceValue) < 0.02 ? '原色' : `${valenceValue > 0 ? '+' : ''}${valenceValue.toFixed(1)}`}
           </span>
         </div>
 

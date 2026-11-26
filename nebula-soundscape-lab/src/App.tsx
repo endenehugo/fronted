@@ -40,8 +40,8 @@ export default function App() {
   const [timbreOverride, setTimbreOverride] = useState<TimbreId | null>(null);
   const [scaleOverride, setScaleOverride] = useState<ScaleId | null>(null);
 
-  /** 效价滑块：-1 低落负向 ↔ 1 正向明亮；null 跟随文本解析结果 */
-  const [valence, setValence] = useState<number | null>(null);
+  /** 配色滑块：相对当前星体配色的色相偏移，-1 偏紫 ↔ +1 偏金；0 = 星体原色（初始位置即"跟随"） */
+  const [valence, setValence] = useState<number>(0);
   /** 星图模式：所有星座连线一起显现（键盘 C 或底部按钮） */
   const [starchart, setStarchart] = useState(false);
 
@@ -71,7 +71,7 @@ export default function App() {
     setPalette(state.colors);
     setTurbulence(state.turbulence);
     setSpeed(state.speed);
-    setValence(state.valence);
+    setValence(state.valence ?? 0);
   }, []);
 
   // ---- 音频引擎状态指示 ----
@@ -151,8 +151,8 @@ export default function App() {
       setTurbulence(res.turbulence);
       setSpeed(res.speed);
       setLog(res.log);
-      // 解析结果回填滑块效价轴；用户手动拖动后以滑块为准
-      setValence(res.vector.valence);
+      // 注意：不再把解析结果回填滑块 —— 那会让用户拖好的位置被一次"潜入"重置，
+      // 滑块保持自己的偏移，情绪解析只负责基底配色与形态。
       audio.setPreset(res.preset);
     },
     [audio],
@@ -179,7 +179,7 @@ export default function App() {
       setTurbulence(p.turbulence);
       setSpeed(p.speed);
       setLog(null);
-      setValence(null);
+      // 切星体保留滑块位置（滑块是"相对当前星体的偏移"，换星体后继续生效）
       audio.setPreset(p);
     },
     [audio],
@@ -193,7 +193,6 @@ export default function App() {
     setLog(null);
     setTurbulence(GALAXY_IDLE.turbulence);
     setSpeed(GALAXY_IDLE.speed);
-    setValence(null);
     audio.setPreset(GALAXY_IDLE);
   }, [audio]);
 
@@ -207,7 +206,6 @@ export default function App() {
     setEmotion(null);
     setPalette(null);
     setLog(null);
-    setValence(null);
     setTurbulence(preset.turbulence);
     setSpeed(preset.speed);
   }, [preset]);
