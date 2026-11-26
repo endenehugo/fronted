@@ -338,12 +338,12 @@ vShape = aShape;
   // 每颗星自己的呼吸节奏：相位错开、频率错开，三次幂让亮的是短促的一闪而不是缓慢起伏
   float tw = pow(0.5 + 0.5 * sin(uTime * (0.9 + aSeed * 2.2) + aSeed * 44.0), 3.0);
   // 峰值不再打到全亮，闪的时候只是“亮一档”，不会白成一颗刺眼的光点
-  vAlpha = 0.10 + 0.5 * tw;
+  vAlpha = 0.10 + 0.42 * tw;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   float basePx = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z));
-  // 尺寸随闪烁只轻微放大（0.9→1.2 倍），并给一个 2.2 像素的下限：
-  // 否则最暗时点片会缩到亚像素，被光栅化成一个硬邦邦的单像素点
-  gl_PointSize = clamp(basePx * (0.9 + 0.3 * tw), 2.2 * uPixelRatio, 48.0);
+  // 尺寸随闪烁只轻微放大，并给一个 3.2 像素的下限：
+  // 再小的话径向贴图在片元里只剩中间两三个纹素，四边一样亮，渲染出来是一块方形马赛克
+  gl_PointSize = clamp(basePx * (0.95 + 0.22 * tw), 3.2 * uPixelRatio, 48.0);
   gl_Position = projectionMatrix * mv;
 }
 `;
@@ -359,9 +359,12 @@ varying float vAlpha;
 varying float vShape;
 
 void main() {
-  vec4 tex = texture2D(uMap, gl_PointCoord);
+  // 直接用屏幕空间的解析高斯，不再采样方形贴图：
+  // 点片只有几个像素时，贴图会把整块面积采样成同一个值，渲染出来就是一块方形马赛克；
+  // 解析核在任意尺寸下都是圆的，边缘永远从中心往外淡。
   vec2 uv = gl_PointCoord - 0.5;
-  float disc = tex.a;
+  float d = length(uv) * 2.0;
+  float disc = exp(-d * d * 3.4) * (1.0 - smoothstep(0.86, 1.0, d));
   if (vShape > 0.5) {
     // 亮星十字星芒：只在少量恒星上出现，是"天文照片感"最省成本的一笔
     float sx = pow(max(0.0, 1.0 - abs(uv.y) * 26.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.x) * 2.2), 1.4);
