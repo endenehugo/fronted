@@ -344,12 +344,11 @@ function createLabelTexture(text: string): { texture: THREE.Texture; aspect: num
   g.font = `600 ${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
   g.textAlign = 'center';
   g.textBaseline = 'middle';
-  g.shadowColor = 'rgba(170, 205, 255, 0.9)';
-  // 外发光范围收小：之前 16px 会让字看起来糊成一团，缩到 7px 只留一圈极轻的边光
-  g.shadowBlur = 7;
-  g.fillStyle = '#FFFFFF';
-  g.fillText(text, cw / 2, ch / 2);
-  g.shadowBlur = 0;
+  g.shadowColor = 'rgba(150, 190, 240, 0.45)';
+  // 只留一圈极轻的边光：之前 16px 会把四个字糊成一团，且加色叠加后过曝
+  g.shadowBlur = 3;
+  // 字色压到淡钢蓝而不是纯白：纯白在加色 + bloom 下会整片发白、反而看不清笔画
+  g.fillStyle = '#C2D2E8';
   g.fillText(text, cw / 2, ch / 2);
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -1044,7 +1043,8 @@ class NebulaEngine {
         transparent: true,
         depthWrite: false,
         depthTest: false,
-        blending: THREE.AdditiveBlending,
+        // 用普通混合而不是加色：加色会把文字亮度叠到过曝（后台星云也会透上来）
+        blending: THREE.NormalBlending,
         opacity: 0,
       });
       const sprite = new THREE.Sprite(material);
@@ -1814,7 +1814,7 @@ class NebulaEngine {
         const sprite = this.labels[i];
         if (sprite) {
           const mat = sprite.material as THREE.SpriteMaterial;
-          mat.opacity = Math.min(1, a * 2.2);
+          mat.opacity = Math.min(0.85, a * 1.1);
           sprite.visible = a > 0.012;
         }
       }

@@ -163,7 +163,7 @@ export default function App() {
   // 灵感词胶囊：等同于输入该词并回车
   const handleInspire = useCallback(
     (word: string) => {
-      setInput(word);
+      // 只按这个词解析、切到对应星体；不把词写进输入框（点预设不该改动用户正在输入的内容）
       runAnalyze(word);
     },
     [runAnalyze],
