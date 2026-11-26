@@ -1343,6 +1343,19 @@ class NebulaEngine {
     this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
     this.uniforms.uTransitionSwirl.value = 0;
+
+    // 悬臂编号也必须落定：着色器里 armFade = 1 - smoothstep(0, 0.22, uMorphProgress)，
+    // 形变一结束 uMorphProgress 回到 0，armFade 又变回 1，于是残留的 aArm（待机星系的 1~6）
+    // 会继续按 `t * armId * 0.011` 逐粒子扭转新形态 —— 从待机星系点进情绪星体时形状是歪的，
+    // 而刷新走「直接初始化」路径 aArm 全为 0，所以只有刷新后才正常。
+    if (this.morphArmTarget) {
+      const armAttr = geo.getAttribute('aArm') as THREE.BufferAttribute | undefined;
+      if (armAttr && this.morphArmTarget.length === armAttr.count) {
+        (armAttr.array as Float32Array).set(this.morphArmTarget);
+        armAttr.needsUpdate = true;
+      }
+      this.morphArmTarget = null;
+    }
     // 声画同步：形变落定时给一记轻柔和弦确认音
     this.audio.arrive();
   }
