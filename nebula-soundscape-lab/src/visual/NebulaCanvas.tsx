@@ -804,6 +804,9 @@ class NebulaEngine {
     this.buildCloud();
 
     this.composer = new EffectComposer(this.renderer);
+    // 后处理链必须按设备像素比渲染：否则 DPR>1 的屏幕上 Composer 只拿到 CSS 像素尺寸，
+    // bloom 整条链路在半分辨率上做模糊再放大回来，亮星就会呈现方块马赛克。
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.6, 0.28, 0.72);
     this.composer.addPass(this.bloom);
@@ -1225,19 +1228,15 @@ class NebulaEngine {
   }
 
   /**
-   * 悬臂锚点在当前时刻的位置（与着色器里的自转 / 差速 / armFade 公式一致）。
-   * 注意必须带上 armFade：着色器里形变推进到 22% 后悬臂自转已经归零，
-   * CPU 侧若继续按 uTime 转，形变后半段 lookAt 的锚点会一直漂，镜头看着像被甩了一下。
+   * 悬臂锚点在当前时刻的位置（与着色器里的统一自转 uSpinPhase 一致）。
+   * 六条悬臂同步转动后不再有 per-arm 摆动，锚点跟随同一个 spinAngle 即可。
    */
   private focusCurrentFromArm(): THREE.Vector3 {
     const base = this.focusBase;
     if (!base) return new THREE.Vector3();
-    const armFade = 1 - smoothstep01(0.0, 0.22, this.morphProgress);
-    // 与着色器 2.1b 一致：有界摆动（不再把 uTime 乘进角度，否则锚点会随时间漂走）
-    const armPhase0 = (this.focusArm + 1) * 1.1;
-    const armSway =
-      (Math.sin(this.uniforms.uTime.value * 0.06 + armPhase0) - Math.sin(armPhase0)) * 0.22;
-    const a = this.spinAngle + armSway * armFade;
+    // 悬臂已改为同步转动（着色器里删掉了 per-arm 摆动），锚点只需跟着同一个自转角走。
+    // 形变期间着色器仍按 uSpinPhase 自转，所以这里必须连续跟随，不能按 armFade 打折。
+    const a = this.spinAngle;
     return new THREE.Vector3(
       base[0] * Math.cos(a) - base[2] * Math.sin(a),
       base[1],
@@ -1554,8 +1553,9 @@ class NebulaEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    // setSize 传入 CSS 尺寸，pixelRatio 由 Composer 自己乘进去，逐个 pass 生效
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(w, h);
-    this.bloom.setSize(w, h);
     this.vignette.uniforms.uAspect.value = w / h;
     this.uniforms.uPixelRatio.value = this.renderer.getPixelRatio();
     this.uniforms.uViewHeight.value = h;
@@ -1790,8 +1790,9 @@ class NebulaEngine {
     this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
-    // 盘面累计自转角：与着色器里绕 Y 轴的 t * omega 同步（待机形态 shear = 0，逐粒子一致）
-    this.spinAngle += this.behaviorCurrent.x * dt;
+    // 盘面自转与粒子自转统一成一个基准：spinPhase（着色器 uSpinPhase）由音频能量驱动，
+    // 盘面贴图、星巢锚点都必须从同一个相位派生，否则三者的角速度不同，悬臂与星巢会越转越错位。
+    this.spinAngle = this.spinPhase;
 
     // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
     if (this.morphActive) {
