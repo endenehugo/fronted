@@ -37,6 +37,7 @@ export default function App() {
   const [audioLive, setAudioLive] = useState(false);
 
   const canvasRef = useRef<NebulaCanvasHandle>(null);
+  const wokenRef = useRef(false);
   const audio = useMemo(() => NebulaAudioEngine.getInstance(), []);
   const preset = useMemo(() => getPreset(presetId), [presetId]);
   const isIdle = presetId === GALAXY_IDLE.id;
@@ -83,20 +84,39 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [presetId, input, palette, turbulence, speed, emotion, launched, preset.colors]);
 
-  // ---- 唤醒星云：解锁音频，从奇点展开为待机大星系 ----
-  const handleLaunch = useCallback(async () => {
-    if (ignited) return;
+  // ---- 唤醒星云：任意一次点击 / 按键即解锁音频，并把标题层淡出 ----
+  const wake = useCallback(() => {
+    if (wokenRef.current) return;
+    wokenRef.current = true;
     setIgnited(true);
-    try {
-      await audio.unlock(preset);
-      audio.setPreset(preset);
-      audio.setVolume(muted ? 0 : volume);
-    } catch {
-      /* 音频不可用时仍然展示视觉 */
-    }
-    canvasRef.current?.expand();
-    window.setTimeout(() => setLaunched(true), 1500);
-  }, [ignited, preset, audio, muted, volume]);
+    setLaunched(true);
+    void (async () => {
+      try {
+        await audio.unlock(preset);
+        audio.setPreset(preset);
+        audio.setVolume(muted ? 0 : volume);
+      } catch {
+        /* 音频不可用时仍然展示视觉 */
+      }
+    })();
+  }, [audio, preset, muted, volume]);
+
+  useEffect(() => {
+    const onFirstGesture = () => wake();
+    const opts: AddEventListenerOptions = { once: true, capture: true };
+    window.addEventListener('pointerdown', onFirstGesture, opts);
+    window.addEventListener('keydown', onFirstGesture, opts);
+    return () => {
+      window.removeEventListener('pointerdown', onFirstGesture, { capture: true });
+      window.removeEventListener('keydown', onFirstGesture, { capture: true });
+    };
+  }, [wake]);
+
+  // ---- 首屏：大星系从一点缓缓展开，作为整页的背景舞台 ----
+  useEffect(() => {
+    const t = window.setTimeout(() => canvasRef.current?.expand(), 300);
+    return () => window.clearTimeout(t);
+  }, []);
 
   // ---- 心情解析：文本 → 情绪向量 → 最近邻星体 + 调色板 + 观测日志 ----
   const runAnalyze = useCallback(
@@ -250,6 +270,15 @@ export default function App() {
         onStats={setStats}
       />
 
+      {/* 影院感压角：只压四周，星系本体保持通透 */}
+      <div
+        className="pointer-events-none fixed inset-0 z-20"
+        style={{
+          background:
+            'radial-gradient(ellipse 78% 70% at 50% 46%, rgba(0,0,0,0) 52%, rgba(0,0,0,0.42) 100%)',
+        }}
+      />
+
       {/* 顶部信息 */}
       <header className="pointer-events-none fixed inset-x-0 top-0 z-40 flex items-start justify-between p-4 sm:p-6">
         <div className="animate-fade-in">
@@ -265,7 +294,7 @@ export default function App() {
               返回大星系
             </button>
           ) : (
-            <div className="mt-1 text-[13px] text-white/85 sm:text-[14px]">{preset.name}</div>
+            <div className="mt-1 text-[13px] text-white/85 sm:text-[14px]">{isIdle ? '星系' : preset.name}</div>
           )}
         </div>
         <div className="animate-fade-in text-right" style={{ animationDelay: '150ms' }}>
@@ -287,25 +316,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* 待机态：极简标题与副标题 */}
-      {launched && isIdle && (
-        <div className="pointer-events-none fixed inset-x-0 top-[14%] z-30 flex flex-col items-center px-6 text-center">
-          <div className="animate-fade-in text-[9px] tracking-[0.5em] text-white/30 sm:text-[10px]">
-            MESSIER 31 · ANDROMEDA
-          </div>
-          <h1
-            key="hero"
-            className="animate-fade-up mt-3 text-[clamp(18px,2.6vw,28px)] font-light leading-snug tracking-[0.12em] text-white/90 [animation-delay:120ms]"
-          >
-            在群星之间写下此刻的心绪
-          </h1>
-          <p className="animate-fade-up mt-2 text-[12px] tracking-[0.08em] text-white/40 [animation-delay:240ms]">
-            输入任意心情，回车潜入属于它的星云
-          </p>
-        </div>
-      )}
-
-      {/* 星云观测日志 */}
+      {/* 观测日志 */}
       {log && (
         <div key={log} className="pointer-events-none fixed inset-x-0 top-[84px] z-40 flex justify-center px-4">
           <div className="animate-fade-up max-w-xl rounded-2xl border border-white/10 bg-black/25 px-5 py-2.5 text-center text-[12px] leading-6 text-white/70 backdrop-blur-md sm:text-[12.5px]">
@@ -315,29 +326,27 @@ export default function App() {
         </div>
       )}
 
-      {/* 底部控制栏 */}
-      {launched && (
-        <ControlDock
-          mode={isIdle ? 'idle' : 'body'}
-          preset={preset}
-          inspirations={INSPIRATIONS}
-          presets={PRESETS}
-          activeId={presetId}
-          onSelect={handleSelectPreset}
-          onInspire={handleInspire}
-          value={input}
-          onChange={setInput}
-          onSubmit={handleAnalyze}
-          onClear={handleClear}
-          volume={volume}
-          muted={muted}
-          onVolume={handleVolume}
-          onToggleMute={handleToggleMute}
-          onCapture={handleCapture}
-          onShare={handleCopyLink}
-          busy={busy}
-        />
-      )}
+      {/* 底部控制栏：首屏就位，作为「潜入」的入口 */}
+      <ControlDock
+        mode={isIdle ? 'idle' : 'body'}
+        preset={preset}
+        inspirations={INSPIRATIONS}
+        presets={PRESETS}
+        activeId={presetId}
+        onSelect={handleSelectPreset}
+        onInspire={handleInspire}
+        value={input}
+        onChange={setInput}
+        onSubmit={handleAnalyze}
+        onClear={handleClear}
+        volume={volume}
+        muted={muted}
+        onVolume={handleVolume}
+        onToggleMute={handleToggleMute}
+        onCapture={handleCapture}
+        onShare={handleCopyLink}
+        busy={busy}
+      />
 
       {/* 明信片弹窗 */}
       {postcard && (
@@ -352,8 +361,8 @@ export default function App() {
         />
       )}
 
-      {/* 启动遮罩 */}
-      {!launched && <LaunchOverlay preset={preset} onLaunch={handleLaunch} fading={ignited} />}
+      {/* 首屏标题层：透明浮在星系之上，不挡交互 */}
+      {!launched && <LaunchOverlay preset={preset} onLaunch={wake} fading={ignited} />}
     </div>
   );
 }
