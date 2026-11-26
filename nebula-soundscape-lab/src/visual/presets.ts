@@ -1,9 +1,10 @@
 import type { NebulaPreset, PresetId, EmotionVector } from '../types';
 
 /**
- * 待机态「仙女座大星系」：进入页面、唤醒音频后的默认形态。
- * 机位 [0, 1.8, 9.2] 换算为球坐标：dist = √(9.2² + 1.8²) ≈ 9.374，phi = acos(1.8 / 9.374) ≈ 1.3777。
- * spin = 0：星系盘面已按 113° 倾角压扁并在屏面内滚转 33°，若再绕世界 Y 轴自转会变成「翻滚」而非盘面旋转。
+ * 待机态「仙女座大星系」：首屏唯一的舞台。
+ * 盘面直接建在 XZ 平面（见 shapeGenerators.ts），所以这里的 behavior.spin 就是真实的绕极轴自转；
+ * shear = 0 让各半径角速度一致，着色器里「盘面整体缓转」才成立，而不是里快外慢地拧花。
+ * 六座情绪星巢嵌在这张盘面上，输入心情后镜头从其中一座拉近，再落到对应的小星云。
  */
 export const GALAXY_IDLE: NebulaPreset = {
   id: 'galaxy_idle',
@@ -11,23 +12,23 @@ export const GALAXY_IDLE: NebulaPreset = {
   english: 'M31 · ANDROMEDA',
   label: '宇',
   colors: ['#FFFDF5', '#B87D56', '#6B7FD7'],
-  bg: '#03040a',
+  bg: '#000000',
   root: 36, // C2
   scale: [0, 3, 5, 7, 10],
   scaleName: 'C 小调五声音阶',
   bpm: 44,
-  turbulence: 0.25,
+  turbulence: 0.2,
   speed: 0.3,
-  spin: 0,
+  spin: 0.035,
   twist: 0,
-  bloom: 0.95,
-  sizeScale: 0.85,
-  description: '仙女座大星系 · 双旋臂、金白核球与两颗伴星系',
+  bloom: 1.0,
+  sizeScale: 1.1,
+  description: '仙女座大星系 · 双旋臂、金白核球，盘面上藏着六座情绪星巢',
   centroid: { valence: 0, arousal: 0, mystery: 0 },
-  behavior: { spin: 0, pulse: 0.04, drift: 0, turbulence: 0.05 },
-  camera: { phi: 1.3777, theta: Math.PI / 2, dist: 9.374 },
+  behavior: { spin: 0.035, pulse: 0.05, drift: 0, turbulence: 0.05 },
+  camera: { phi: 0.72, theta: 2.35, dist: 9.4 },
   shear: 0,
-  core: 0.3,
+  core: 0.0,
 };
 
 /**
@@ -57,7 +58,7 @@ export const PRESETS: NebulaPreset[] = [
     description: '蝴蝶双叶星云 · 舒展缓转、低湍流、深海呼吸感',
     centroid: { valence: 0.35, arousal: -0.65, mystery: 0.25 },
     behavior: { spin: 0.22, pulse: 0.1, drift: 0, turbulence: 0.1 },
-    camera: { phi: 0.62, theta: 1.57, dist: 5.3 },
+    camera: { phi: 0.62, theta: 1.57, dist: 6.5 },
     shear: 0.15,
     core: 0.42,
   },
@@ -81,7 +82,7 @@ export const PRESETS: NebulaPreset[] = [
     description: '超新星残骸 · 纤维球壳与八向喷流',
     centroid: { valence: 0.85, arousal: 0.8, mystery: 0.1 },
     behavior: { spin: 0.38, pulse: 0.22, drift: 0, turbulence: 0.16 },
-    camera: { phi: 1.12, theta: 1.05, dist: 5.5 },
+    camera: { phi: 1.12, theta: 1.05, dist: 6.7 },
     shear: 0.1,
     core: 0.62,
   },
@@ -105,7 +106,7 @@ export const PRESETS: NebulaPreset[] = [
     description: '黑洞吸积盘 · 事件视界与爱因斯坦环',
     centroid: { valence: -0.65, arousal: -0.35, mystery: 0.55 },
     behavior: { spin: 0.34, pulse: 0.06, drift: 0, turbulence: 0.05 },
-    camera: { phi: 1.26, theta: 0.92, dist: 5.2 },
+    camera: { phi: 1.26, theta: 0.92, dist: 6.4 },
     shear: 2.4,
     core: 0.1,
   },
@@ -129,7 +130,7 @@ export const PRESETS: NebulaPreset[] = [
     description: '脉冲星磁感线 · 双极光束与偶极环',
     centroid: { valence: 0.2, arousal: 0.35, mystery: 0.05 },
     behavior: { spin: 0.16, pulse: 0.1, drift: 0, turbulence: 0.06 },
-    camera: { phi: 1.05, theta: 0.62, dist: 5.2 },
+    camera: { phi: 1.05, theta: 0.62, dist: 6.4 },
     shear: 0.05,
     core: 0.5,
   },
@@ -153,7 +154,7 @@ export const PRESETS: NebulaPreset[] = [
     description: '红巨星日冕 · 湍流星体与日珥磁拱',
     centroid: { valence: -0.25, arousal: 0.75, mystery: 0.3 },
     behavior: { spin: 0.2, pulse: 0.18, drift: 0, turbulence: 0.2 },
-    camera: { phi: 1.0, theta: 1.2, dist: 5.4 },
+    camera: { phi: 1.0, theta: 1.2, dist: 6.6 },
     shear: 0.05,
     core: 0.5,
   },
@@ -177,7 +178,7 @@ export const PRESETS: NebulaPreset[] = [
     description: '创生之柱 · 三塔耸立与顶端气态球',
     centroid: { valence: 0.6, arousal: -0.15, mystery: 0.35 },
     behavior: { spin: 0.1, pulse: 0.08, drift: 0.16, turbulence: 0.08 },
-    camera: { phi: 1.34, theta: 1.5, dist: 6.1 },
+    camera: { phi: 1.34, theta: 1.5, dist: 7.3 },
     shear: 0.02,
     core: 0.34,
   },

@@ -12,7 +12,8 @@ import {
   starfieldFragmentShader,
   starfieldVertexShader,
 } from './nebulaShaders';
-import { buildShape, type ShapeAttributes } from './shapeGenerators';
+import { createGalaxyTexture } from './galaxyTexture';
+import { buildShape, idleNestFor, type ShapeAttributes } from './shapeGenerators';
 import type { EmotionVector, NebulaPreset, PresetId } from '../types';
 import { NebulaAudioEngine } from '../audio/NebulaAudioEngine';
 
@@ -55,8 +56,10 @@ const SWIRL_AMP = 1.1;
 /** 相机指数阻尼系数 λ：1.6 时 2.8s 内收敛到 99%，与「星际潜入」形变同长 */
 const CAM_DAMP = 1.6;
 
-/** 背景星野恒星数（桌面 / 移动） */
-const STARFIELD_COUNT = { desktop: 3500, mobile: 2000 };
+/** 背景星野两层：远层铺满深空，近层负责推镜视差（数量为桌面 / 移动） */
+const GALAXY_SURFACE_SIZE = 8.0;
+const STARFIELD_FAR = { desktop: 13000, mobile: 7000 };
+const STARFIELD_NEAR = { desktop: 3200, mobile: 1800 };
 
 /** 切换预设瞬间的 Bloom 能量涌动：上浮量与连点封顶（防叠加爆白） */
 const BLOOM_KICK = 0.15;
@@ -108,8 +111,18 @@ class NebulaEngine {
   private points: THREE.Points;
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
+  /** 近层星野（半径更小、转得更快，提供推镜视差） */
+  private starfieldNear!: THREE.Points;
   private starMaterial!: THREE.ShaderMaterial;
   private coreSprite: THREE.Sprite;
+  /** 盘面柔光：一层屏向椭圆光斑，把点云揉成连续发光面 */
+  private diskGlow!: THREE.Sprite;
+  private diskSurface!: THREE.Group;
+  /** 底纹透明度：随 morph 淡出，避免飞向情绪星云时残留 */
+  private surfaceTarget = 0;
+  private surfaceCurrent = 0;
+  private glowTarget = 0;
+  private glowCurrent = 0;
   private material: THREE.ShaderMaterial;
   private uniforms: Record<string, THREE.IUniform>;
   private texture: THREE.CanvasTexture;
@@ -155,6 +168,7 @@ class NebulaEngine {
   // 双缓冲形变
   private morphActive = false;
   private morphProgress = 0;
+  private morphArmTarget: Float32Array | null = null;
   private transitionSwirl = 0;
 
   // 相机
@@ -167,6 +181,16 @@ class NebulaEngine {
   private userCam = false;
   private velTheta = 0;
   private velPhi = 0;
+
+  // 潜入运镜：盘面累计自转角 + 目标星巢的世界坐标
+  private spinAngle = 0;
+  private focusTarget = new THREE.Vector3();
+  private focusCurrent = new THREE.Vector3();
+  /** 悬臂取景锚点（未旋转坐标）；null 表示回到原点取景 */
+  private focusBase: [number, number, number] | null = null;
+  private focusArm = 0;
+  private lookAtPoint = new THREE.Vector3();
+  private focusWeight = 0;
 
   // 交互形变
   private collapse = 1;
@@ -207,7 +231,7 @@ class NebulaEngine {
     this.emotion = emotion;
     this.onStats = onStats;
     this.shapeId = preset.id;
-    this.count = isMobileDevice() ? 8000 : 18000;
+    this.count = isMobileDevice() ? 20000 : 60000;
 
     const w = container.clientWidth || window.innerWidth;
     const h = container.clientHeight || window.innerHeight;
@@ -240,6 +264,7 @@ class NebulaEngine {
       uTime: { value: 0 },
       uMorphProgress: { value: 0 },
       uTransitionSwirl: { value: 0 },
+      uMorphFade: { value: 1 },
       uBehavior: { value: this.behaviorCurrent.clone() },
       uShear: { value: preset.shear },
       uBass: { value: 0 },
@@ -291,11 +316,44 @@ class NebulaEngine {
     this.coreSprite.scale.set(1.6, 1.6, 1);
     this.scene.add(this.coreSprite);
 
+    this.diskGlow = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.texture,
+        color: new THREE.Color('#F3CE96'),
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        depthTest: false,
+      }),
+    );
+    this.diskGlow.scale.set(10.6, 4.4, 1);
+    this.scene.add(this.diskGlow);
+
+    // 星系底纹：贴在盘面上的一张光面，负责「连续的盘」，粒子只负责闪烁与形变
+    this.diskSurface = new THREE.Group();
+    const surfaceMat = new THREE.MeshBasicMaterial({
+      map: createGalaxyTexture(),
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+    const surfaceMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(GALAXY_SURFACE_SIZE, GALAXY_SURFACE_SIZE),
+      surfaceMat,
+    );
+    surfaceMesh.rotation.x = Math.PI / 2;
+    this.diskSurface.add(surfaceMesh);
+    this.scene.add(this.diskSurface);
+
     this.buildStarfield();
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 1.1, 0.75, 0.12);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.6, 0.28, 0.72);
     this.composer.addPass(this.bloom);
 
     this.applyPreset(preset, emotion, true);
@@ -306,45 +364,12 @@ class NebulaEngine {
   // -------------------------------------------------------------- 几何
 
   /**
-   * 独立背景星野：半径 35~65 的球壳 THREE.Points，色温涵盖冷白 / 淡蓝 / 暖黄，
-   * 尺寸随机（少数亮星更大），只用一份轻量着色器做闪烁，主循环里整体缓慢微旋。
+   * 背景星野两层：远层是半径 35~65 的球壳，真正的深空底噪，整层极慢微旋；
+   * 近层是半径 14~26 的一圈稀疏亮星，镜头从大星系推近小星云时会明显视差位移，
+   * 这是「潜入感」的关键——只有远层的话，推镜几乎看不出空间纵深。
    */
   private buildStarfield(): void {
-    const n = isMobileDevice() ? STARFIELD_COUNT.mobile : STARFIELD_COUNT.desktop;
-    const pos = new Float32Array(n * 3);
-    const col = new Float32Array(n * 3);
-    const size = new Float32Array(n);
-    const seed = new Float32Array(n);
-    const tints: [number, number, number][] = [
-      [0.82, 0.88, 1.0], // 冷白
-      [0.66, 0.78, 1.0], // 淡蓝
-      [1.0, 0.88, 0.68], // 暖黄
-      [1, 1, 1],
-    ];
-    const rMin = 35;
-    const rMax = 65;
-    for (let i = 0; i < n; i++) {
-      // 球壳内按体积均匀分布
-      const u = Math.random() * 2 - 1;
-      const ph = Math.random() * Math.PI * 2;
-      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
-      const st = Math.sqrt(1 - u * u);
-      pos[i * 3] = r * st * Math.cos(ph);
-      pos[i * 3 + 1] = r * u;
-      pos[i * 3 + 2] = r * st * Math.sin(ph);
-      const t = tints[Math.floor(Math.random() * tints.length)];
-      const b = 0.55 + Math.random() * 0.45;
-      col[i * 3] = t[0] * b;
-      col[i * 3 + 1] = t[1] * b;
-      col[i * 3 + 2] = t[2] * b;
-      size[i] = Math.random() < 0.06 ? 4 + Math.random() * 2.5 : 1.6 + Math.random() * 3.2;
-      seed[i] = Math.random();
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
-    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    const mobile = isMobileDevice();
     this.starMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
@@ -358,9 +383,58 @@ class NebulaEngine {
       depthTest: false,
       blending: THREE.AdditiveBlending,
     });
-    this.starfield = new THREE.Points(geo, this.starMaterial);
-    this.starfield.frustumCulled = false;
-    this.scene.add(this.starfield);
+    this.starfield = this.createStarLayer(
+      35,
+      65,
+      mobile ? STARFIELD_FAR.mobile : STARFIELD_FAR.desktop,
+      1,
+    );
+    this.starfieldNear = this.createStarLayer(
+      14,
+      26,
+      mobile ? STARFIELD_NEAR.mobile : STARFIELD_NEAR.desktop,
+      0.46,
+    );
+  }
+
+  private createStarLayer(rMin: number, rMax: number, n: number, sizeScale: number): THREE.Points {
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    const size = new Float32Array(n);
+    const seed = new Float32Array(n);
+    const tints: [number, number, number][] = [
+      [0.82, 0.88, 1.0], // 冷白
+      [0.66, 0.78, 1.0], // 淡蓝
+      [1.0, 0.88, 0.68], // 暖黄
+      [1, 1, 1],
+    ];
+    for (let i = 0; i < n; i++) {
+      // 球壳内按体积均匀分布
+      const u = Math.random() * 2 - 1;
+      const ph = Math.random() * Math.PI * 2;
+      const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
+      const st = Math.sqrt(1 - u * u);
+      pos[i * 3] = r * st * Math.cos(ph);
+      pos[i * 3 + 1] = r * u;
+      pos[i * 3 + 2] = r * st * Math.sin(ph);
+      const t = tints[Math.floor(Math.random() * tints.length)];
+      const b = 0.3 + Math.random() * 0.55;
+      col[i * 3] = t[0] * b;
+      col[i * 3 + 1] = t[1] * b;
+      col[i * 3 + 2] = t[2] * b;
+      size[i] =
+        (Math.random() < 0.06 ? 4 + Math.random() * 2.5 : 1.6 + Math.random() * 3.2) * sizeScale;
+      seed[i] = Math.random();
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    const points = new THREE.Points(geo, this.starMaterial);
+    points.frustumCulled = false;
+    this.scene.add(points);
+    return points;
   }
 
   private buildGeometry(count: number, shape: ShapeAttributes): THREE.BufferGeometry {
@@ -378,6 +452,7 @@ class NebulaEngine {
     geo.setAttribute('aColor', new THREE.BufferAttribute(shape.color.slice(), 3));
     geo.setAttribute('aColorW', new THREE.BufferAttribute(shape.colorW.slice(), 1));
     geo.setAttribute('aTargetColorW', new THREE.BufferAttribute(shape.colorW.slice(), 1));
+    geo.setAttribute('aArm', new THREE.BufferAttribute(shape.arm.slice(), 1));
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 60);
     return geo;
   }
@@ -388,11 +463,33 @@ class NebulaEngine {
     const geo = this.buildGeometry(n, shape);
     this.points.geometry.dispose();
     this.points.geometry = geo;
+    if (this.morphArmTarget) {
+      const armAttr = geo.getAttribute('aArm') as THREE.BufferAttribute | undefined;
+      const target = this.morphArmTarget;
+      if (armAttr && target.length === armAttr.count) {
+        (armAttr.array as Float32Array).set(target);
+        armAttr.needsUpdate = true;
+      }
+      this.morphArmTarget = null;
+    }
     this.morphActive = false;
     this.morphProgress = 0;
     this.transitionSwirl = 0;
     this.uniforms.uMorphProgress.value = 0;
     this.uniforms.uTransitionSwirl.value = 0;
+  }
+
+  /** 悬臂锚点在当前时刻的位置（与着色器里的自转/差速公式一致） */
+  private focusCurrentFromArm(_unused: number): THREE.Vector3 {
+    const base = this.focusBase;
+    if (!base) return new THREE.Vector3();
+    const a =
+      this.spinAngle + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value;
+    return new THREE.Vector3(
+      base[0] * Math.cos(a) - base[2] * Math.sin(a),
+      base[1],
+      base[0] * Math.sin(a) + base[2] * Math.cos(a),
+    );
   }
 
   // -------------------------------------------------------------- 形变
@@ -413,6 +510,7 @@ class NebulaEngine {
     write('aTargetRole', next.role);
     write('aTargetColorT', next.colorT);
     write('aTargetColorW', next.colorW);
+    this.morphArmTarget = next.arm;
     // 目标形态使用逐顶点色（待机大星系）时才覆写 aColor：
     // 情绪星体的 colorW = 0，aColor 对渲染无影响，可直接当作「目标顶点色」容器
     if (next.colorW.some((w) => w > 0)) write('aColor', next.color);
@@ -521,6 +619,7 @@ class NebulaEngine {
 
   applyPreset(preset: NebulaPreset, emotion: EmotionVector | null, immediate = false): void {
     const shapeChanged = preset.id !== this.shapeId;
+    const wasIdle = this.shapeId === 'galaxy_idle';
     this.preset = preset;
     this.emotion = emotion;
     this.shapeId = preset.id;
@@ -529,6 +628,8 @@ class NebulaEngine {
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
+    this.glowTarget = preset.id === 'galaxy_idle' ? 0.13 : 0;
+    this.surfaceTarget = preset.id === 'galaxy_idle' ? 0.16 : 0;
     // Bloom 能量涌动：只上浮当前值，目标值不动，随后指数回落到预设值
     if (!immediate) this.bloomKick = Math.min(this.bloomKick + BLOOM_KICK, BLOOM_KICK_MAX);
 
@@ -544,6 +645,19 @@ class NebulaEngine {
     this.camPhiTarget = preset.camera.phi;
     this.camDistTarget = preset.camera.dist;
     this.userCam = false;
+
+    // 从待机大星系出发：先望住盘中对应那座情绪星巢，随形变把视线收回原点
+    const nest = wasIdle && shapeChanged ? idleNestFor(preset.id) : undefined;
+    if (nest) {
+      this.focusBase = [nest.center[0], nest.center[1], nest.center[2]];
+      this.focusArm = nest.arm;
+      this.focusTarget.copy(this.focusCurrentFromArm(0));
+      this.focusCurrent.copy(this.focusTarget);
+    } else {
+      this.focusBase = null;
+      this.focusTarget.set(0, 0, 0);
+      this.focusCurrent.set(0, 0, 0);
+    }
 
     if (immediate) {
       this.bloomCurrent = this.bloomTarget;
@@ -633,7 +747,7 @@ class NebulaEngine {
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     this.userCam = true;
-    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 5, 24);
+    this.camDist = THREE.MathUtils.clamp(this.camDist + e.deltaY * 0.008, 6.6, 10.2);
     this.camDistTarget = this.camDist;
   };
 
@@ -814,16 +928,21 @@ class NebulaEngine {
     this.shearCurrent = THREE.MathUtils.damp(this.shearCurrent, this.shearTarget, 3.0, dt);
     this.uniforms.uShear.value = this.shearCurrent;
 
+    // 盘面累计自转角：与着色器里绕 Y 轴的 t * omega 同步（待机形态 shear = 0，逐粒子一致）
+    this.spinAngle += this.behaviorCurrent.x * dt;
+
     // 双缓冲形变推进：错峰波浪 + 潮汐旋涡（中段最强、两端归零）
     if (this.morphActive) {
       this.morphProgress = Math.min(1, this.morphProgress + dt / MORPH_DURATION);
       this.transitionSwirl = SWIRL_AMP * Math.sin(Math.PI * this.morphProgress);
       this.uniforms.uMorphProgress.value = this.morphProgress;
       this.uniforms.uTransitionSwirl.value = this.transitionSwirl;
+      this.uniforms.uMorphFade.value = 1 - 0.7 * Math.sin(Math.PI * this.morphProgress);
       if (this.morphProgress >= 1) this.finalizeMorph();
     } else if (this.transitionSwirl !== 0) {
       this.transitionSwirl = 0;
       this.uniforms.uTransitionSwirl.value = 0;
+      this.uniforms.uMorphFade.value = 1;
     }
 
     // 指针
@@ -875,19 +994,65 @@ class NebulaEngine {
     );
     this.camera.lookAt(0, 0, 0);
 
+    // 潜入：形变前半段把视线钉在目标星巢上，随后收回原点，权重随形变进度退坡
+    if (this.focusBase) {
+      const rotated = this.focusCurrentFromArm(0);
+      this.focusTarget.copy(rotated);
+    }
+
+    this.focusWeight = this.morphActive
+      ? 1 - smoothstep01(0.04, 0.62, this.morphProgress)
+      : 0;
+    this.lookAtPoint.copy(this.focusCurrent).multiplyScalar(this.focusWeight);
+    this.camera.lookAt(this.lookAtPoint);
+
+    // 推镜时轻微收一点视角，制造被「吸进去」的呼吸感
+    const fov = 55 - 5 * Math.sin(Math.PI * this.morphProgress);
+    if (Math.abs(this.camera.fov - fov) > 0.02) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+
     // 背景星野：缓慢微旋 + 错相位闪烁
     this.starfield.rotation.y += dt * 0.004;
+    this.starfieldNear.rotation.y -= dt * 0.011;
     this.starMaterial.uniforms.uTime.value = t;
 
     // 核心辉光随低频呼吸（强度按形态：黑洞视界需保持绝对空心）
     const coreMat = this.coreSprite.material as THREE.SpriteMaterial;
     const coreK = this.coreCurrent;
-    this.coreSprite.scale.setScalar((1.0 + bands.bass * 0.6) * (0.3 + coreK * 0.8));
+    const corePulse = 1.0 + bands.bass * 0.6;
+    this.coreSprite.scale.set(
+      corePulse * (0.3 + coreK * 0.8) * 1.5,
+      corePulse * (0.3 + coreK * 0.8),
+      1,
+    );
     coreMat.opacity = (0.08 + bands.bass * 0.12) * coreK;
     coreMat.color.copy(this.uniformColors[0]);
 
+    // 盘面柔光：只在大星系待机时出现，随形变淡出
+    this.glowCurrent = THREE.MathUtils.damp(this.glowCurrent, this.glowTarget, 3.0, dt);
+    const glowMat = this.diskGlow.material as THREE.SpriteMaterial;
+    glowMat.opacity = this.glowCurrent + bands.bass * 0.015;
+
+    // 底纹：morph 期间淡出，平时跟星系一起自转
+    const surfaceFade = 1 - Math.min(1, Math.max(0, (this.morphProgress - 0.0) / 0.55));
+    this.surfaceCurrent = THREE.MathUtils.damp(
+      this.surfaceCurrent,
+      this.surfaceTarget * surfaceFade,
+      3.4,
+      dt,
+    );
+    const surfaceMat = (this.diskSurface.children[0] as THREE.Mesh)
+      .material as THREE.MeshBasicMaterial;
+    surfaceMat.opacity = this.surfaceCurrent;
+    this.diskSurface.rotation.y = this.spinAngle;
+    glowMat.color.copy(this.uniformColors[2]);
+
     // Bloom 随低频脉动
     this.bloom.strength = this.bloomCurrent * 0.92 + bands.bass * 0.95 + this.bloomKick;
+    // 形变中段粒子会穿过圆心堆叠，压一压 bloom 避免糊成一团白球
+    if (this.morphActive) this.bloom.strength *= 1 - 0.55 * Math.sin(Math.PI * this.morphProgress);
 
     // 帧率监控：低帧率自动降级
     this.warmup += dt;
@@ -920,12 +1085,12 @@ class NebulaEngine {
       if (
         this.warmup > 3 &&
         this.lowFpsStreak >= 3 &&
-        this.count > 8000 &&
+        this.count > 14000 &&
         !this.morphActive &&
         !this.downgraded
       ) {
         this.downgraded = true;
-        this.applyCount(8000);
+        this.applyCount(14000);
       }
       this.fpsAccum = 0;
       this.fpsFrames = 0;
@@ -962,9 +1127,15 @@ class NebulaEngine {
     this.resizeObserver?.disconnect();
     this.points.geometry.dispose();
     this.starfield.geometry.dispose();
+    this.starfieldNear.geometry.dispose();
     this.starMaterial.dispose();
     this.material.dispose();
     this.coreSprite.material.dispose();
+    this.diskGlow.material.dispose();
+    const surfaceMesh = this.diskSurface.children[0] as THREE.Mesh;
+    surfaceMesh.geometry.dispose();
+    (surfaceMesh.material as THREE.MeshBasicMaterial).map?.dispose();
+    (surfaceMesh.material as THREE.MeshBasicMaterial).dispose();
     this.texture.dispose();
     this.composer.dispose();
     this.renderer.dispose();
