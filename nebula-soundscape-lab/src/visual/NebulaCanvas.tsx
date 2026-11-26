@@ -1235,8 +1235,11 @@ class NebulaEngine {
     const base = this.focusBase;
     if (!base) return new THREE.Vector3();
     const armFade = 1 - smoothstep01(0.0, 0.22, this.morphProgress);
-    const a =
-      this.spinAngle + (this.focusArm + 1) * 0.011 * this.uniforms.uTime.value * armFade;
+    // 与着色器 2.1b 一致：有界摆动（不再把 uTime 乘进角度，否则锚点会随时间漂走）
+    const armPhase0 = (this.focusArm + 1) * 1.1;
+    const armSway =
+      (Math.sin(this.uniforms.uTime.value * 0.06 + armPhase0) - Math.sin(armPhase0)) * 0.22;
+    const a = this.spinAngle + armSway * armFade;
     return new THREE.Vector3(
       base[0] * Math.cos(a) - base[2] * Math.sin(a),
       base[1],

@@ -176,11 +176,16 @@ void main() {
   //     页面开得越久转得越快。角速度随潮汐能量与中频在约 2.5 倍范围内起伏：高潮加速、低落近乎静止。
   base.xz = rot2(base.xz, uSpinPhase * (1.0 + uShear * role / (0.35 + r)));
 
-  // 2.1b 六条情绪悬臂各自的差速自转：每条臂一个转速，臂与臂之间缓慢错开；
-  //      形变一开始就收束回统一转速，避免过渡期被甩出去。
+  // 2.1b 六条情绪悬臂之间缓慢错开。
+  //      注意：这里必须是有界摆动，不能写成 t * armId * 速率 —— 那样角位移会随时间无限累积，
+  //      页面开一分钟后手臂编号 6 的粒子已被多转 ~8 rad，整颗星系看起来就像换了一颗
+  //      （点「返回大星系」时与刚进页面时不一致，刷新后才"变回来"，就是这个原因）。
+  //      减掉 t=0 的相位，保证首帧形态与原来的设计完全一致。
   float armFade = 1.0 - smoothstep(0.0, 0.22, uMorphProgress);
   float armId = aArm;
-  base.xz = rot2(base.xz, t * armId * 0.011 * armFade);
+  float armPhase0 = armId * 1.1;
+  float armSway = (sin(t * 0.06 + armPhase0) - sin(armPhase0)) * 0.22;
+  base.xz = rot2(base.xz, armSway * armFade);
 
   // 2.2 径向脉冲（随低频能量呼吸）
   float pulse = uBehavior.y * uBass * (0.55 + 0.45 * sin(t * 3.4 + aSeed * 6.2831));
