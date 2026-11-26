@@ -131,6 +131,7 @@ varying vec3  vColor;
 varying float vGlow;
 varying float vAlpha;
 varying float vShape;
+varying float vSize;
 
 ${NOISE_GLSL}
 
@@ -243,6 +244,9 @@ void main() {
   // 34.0 是 900px 视高下的经验系数，按视高归一后大小与分辨率无关；同时夹住移动端 GPU 的点尺寸上限
   float pxScale = 34.0 * (uViewHeight / 900.0);
   gl_PointSize = clamp(sizePx * pxScale / depth, 0.6, 160.0);
+  // 带形状的星（四芒 / 光条）至少留 4 个像素：太小时星芒会被光栅化成一个硬点
+  if (vShape > 0.5) gl_PointSize = max(gl_PointSize, 4.0 * uPixelRatio);
+  vSize = gl_PointSize;
   gl_Position = projectionMatrix * mv;
 
   // ================= 5. 颜色 =================
@@ -274,6 +278,7 @@ varying vec3  vColor;
 varying float vGlow;
 varying float vAlpha;
 varying float vShape;
+varying float vSize;
 
 void main() {
   vec4 tex = texture2D(uMap, gl_PointCoord);
@@ -284,18 +289,21 @@ void main() {
 
   float mask = disc;
   float gain = 1.0;
+  // 点面积小于约 8px 时星芒根本铺不开，会缩成一个过亮的硬像素：
+  // 这一段按实际屏幕尺寸把星芒/光条淡回圆核，宁可少一点芒，也不要闪出一颗死白点
+  float shapeFade = smoothstep(3.0, 9.0, vSize);
 
   if (vShape > 0.5 && vShape < 1.5) {
     // 四芒星：横竖两条高次幂窄带交叉，中心保留一点圆核，尖角自然收束
     float sx = pow(max(0.0, 1.0 - abs(uv.y) * 30.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.x) * 2.6), 1.5);
     float sy = pow(max(0.0, 1.0 - abs(uv.x) * 30.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.y) * 2.6), 1.5);
-    mask = disc * 0.28 + (sx + sy) * 1.7;
-    gain = 1.25;
+    mask = disc * mix(1.0, 0.28, shapeFade) + (sx + sy) * 1.7 * shapeFade;
+    gain = mix(1.0, 1.25, shapeFade);
   } else if (vShape > 1.5) {
     // 细光条：沿 X 拉长的软线，像被潮汐扯开的气体丝
     float streak = exp(-uv.y * uv.y * 320.0) * exp(-abs(uv.x) * 2.0);
-    mask = disc * 0.22 + streak;
-    gain = 0.92;
+    mask = disc * mix(1.0, 0.22, shapeFade) + streak * shapeFade;
+    gain = mix(1.0, 0.92, shapeFade);
   }
 
   float a = mask * vAlpha;
