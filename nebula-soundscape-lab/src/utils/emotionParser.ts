@@ -385,7 +385,11 @@ function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
 export function blendPalette(preset: NebulaPreset, e: EmotionVector): Palette {
   return preset.colors.map((hex, i) => {
     const [h, s, l] = rgbToHsl(...hexToRgb(hex));
-    const hue = (h - e.valence * 34 + e.mystery * 24 + 360) % 360;
+    // 色相偏移必须限幅：原来 -valence*34 + mystery*24 最大能偏 ±50°，
+    // 「内耗」(-0.7, mystery 0.3) 会把「释放」的金橙（h≈41°）整体推到 ≈72° —— 直接变成黄绿，
+    // 完全脱离了该星体的辨识色。情绪主要靠饱和度/明度表达，色相只做小幅"染色"。
+    const shift = Math.max(-12, Math.min(12, -e.valence * 18 + e.mystery * 12));
+    const hue = (h + shift + 360) % 360;
     const sat = Math.min(1, Math.max(0.25, s * (0.92 + e.arousal * 0.22)));
     const light = Math.min(0.95, Math.max(0.06, l + e.valence * 0.05 + e.arousal * 0.04 + (i === 0 ? 0.02 : 0)));
     return hslToHex(hue, sat * 100, light * 100);
