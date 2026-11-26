@@ -37,6 +37,8 @@ interface Props {
   palette: [string, string, string] | null;
   turbulence: number;
   speed: number;
+  /** 效价滑块 -1~1；null 表示未启用，跟随文本解析 */
+  valence: number | null;
   onStats?: (s: NebulaStats) => void;
 }
 
@@ -186,6 +188,11 @@ class NebulaEngine {
   private morphActive = false;
   private morphProgress = 0;
   private transitionSwirl = 0;
+
+  // 效价滑块：只改配色、不动几何；mix ∈ [-1,1]，null = 未启用，跟随预设/解析配色
+  private valenceMix: number | null = null;
+  /** 配色锁定源：'preset' 跟随预设/解析，'valence' 被滑块手动锁定 */
+  private colorSource: 'preset' | 'valence' = 'preset';
 
   // 相机
   private camTheta = 0.4;
@@ -575,8 +582,10 @@ class NebulaEngine {
     this.emotion = emotion;
     this.shapeId = preset.id;
 
-    // 以预设色为基底（解析色随后由 overrideColors 覆写）
-    this.targetColors = preset.colors.map((c) => new THREE.Color(c));
+    // 滑块锁定配色时，预设切换/解析配色不覆盖它；否则以预设色为基底（解析色随后由 overrideColors 覆写）
+    if (this.colorSource !== 'valence') {
+      this.targetColors = preset.colors.map((c) => new THREE.Color(c));
+    }
     this.bloomTarget = preset.bloom;
     this.sizeTarget = preset.sizeScale;
     this.coreTarget = preset.core;
@@ -627,11 +636,41 @@ class NebulaEngine {
     );
   }
 
-  /** 覆盖目标调色板（心情解析生成的连续色） */
+  /** 覆盖目标调色板（心情解析生成的连续色）；滑块锁定时不覆写 */
   overrideColors(colors: THREE.Color[]): void {
-    if (colors.length === 3) {
+    if (colors.length === 3 && this.colorSource !== 'valence') {
       this.targetColors = colors;
     }
+  }
+
+  /**
+   * 效价滑块：mix ∈ [-1,1]，-1 锚定深思/低落配色，1 锚定狂喜/明亮配色。
+   * 只在两端调色板间渐变，几何形状保持当前预设不变；传 null 关闭，回到当前预设/解析配色。
+   */
+  setValenceMix(mix: number | null): void {
+    if (mix === null) {
+      this.valenceMix = null;
+      this.colorSource = 'preset';
+      // 关闭滑块：回到当前预设/解析配色
+      this.targetColors = this.preset.colors.map((c) => new THREE.Color(c));
+      return;
+    }
+    this.valenceMix = Math.min(1, Math.max(-1, mix));
+    this.colorSource = 'valence';
+    this.applyValenceColors();
+  }
+
+  /** 按当前 valenceMix 在两端调色板间插值配色（不触碰任何几何缓冲） */
+  private applyValenceColors(): void {
+    if (this.valenceMix === null) return;
+    const t = (this.valenceMix + 1) / 2; // 0 低落端 → 1 明亮端
+    const lowC = PRESET_MAP.melancholy.colors;
+    const highC = PRESET_MAP.euphoria.colors;
+    this.targetColors = lowC.map((hex, i) => {
+      const c0 = new THREE.Color(hex);
+      const c1 = new THREE.Color(highC[i]);
+      return c0.lerp(c1, t);
+    });
   }
 
   /** 覆盖湍流 / 旋转速度目标值（心情解析结果，相对预设缩放） */
@@ -1070,7 +1109,7 @@ class NebulaEngine {
 }
 
 export const NebulaCanvas = forwardRef<NebulaCanvasHandle, Props>(function NebulaCanvas(
-  { preset, emotion, palette, turbulence, speed, onStats },
+  { preset, emotion, palette, turbulence, speed, valence, onStats },
   ref,
 ) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -1089,6 +1128,12 @@ export const NebulaCanvas = forwardRef<NebulaCanvasHandle, Props>(function Nebul
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!engineRef.current) return;
+    const engine = engineRef.current;
+    engine.setValenceMix(valence);
+  }, [valence]);
 
   useEffect(() => {
     if (!engineRef.current) return;
