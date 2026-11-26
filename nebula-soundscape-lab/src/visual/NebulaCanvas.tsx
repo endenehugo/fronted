@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import {
   cloudFragmentShader,
   cloudVertexShader,
@@ -453,6 +454,13 @@ const SPIN_MID = 0.25;
 const BLOOM_KICK = 0.15;
 const BLOOM_KICK_MAX = 0.3;
 
+/**
+ * 全局曝光总开关（配合 ACESFilmicToneMapping + OutputPass）。
+ * 有 sRGB 编码之后整条链路才"正确"，提亮/压暗只改这一个数：
+ *   1.0 = 中性；1.15 偏亮；0.85 偏暗。改完刷新即可看到。
+ */
+const EXPOSURE = 1.0;
+
 /** 与 GLSL smoothstep 等价，供 CPU 中断烘焙复现着色器里的错峰插值 */
 const smoothstep01 = (e0: number, e1: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -497,6 +505,7 @@ class NebulaEngine {
   private composer: EffectComposer;
   private bloom: UnrealBloomPass;
   private vignette: ShaderPass;
+  private outputPass: OutputPass;
   private points: THREE.Points;
   /** 深空背景星野（常驻图层，不参与形变） */
   private starfield!: THREE.Points;
@@ -672,6 +681,11 @@ class NebulaEngine {
       preserveDrawingBuffer: true, // 明信片导出必需
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // 粒子是加色混合的高动态范围画面：不做色调映射时高光直接剪白、中间调压在暗部。
+    // 曝光取 1.0（中性）—— 之前 1.35 是给"没有 OutputPass"那套配色用的，现在有了
+    // sRGB 编码，再开 1.35 会过曝；需要整体提亮/压暗就只改这一个数。
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = EXPOSURE;
     this.renderer.setSize(w, h);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.domElement.style.width = '100%';
@@ -798,6 +812,12 @@ class NebulaEngine {
     this.vignette = new ShaderPass(VignetteShader);
     this.vignette.uniforms.uAspect.value = w / h;
     this.composer.addPass(this.vignette);
+    // OutputPass 负责「线性 → sRGB 编码 + 色调映射」：
+    // 少了它，合成器会把线性值直接写进 sRGB framebuffer —— 整体暗一档、
+    // 中间调挤在暗部、高光剪成纯白。这就是「画面发灰发暗」的另一半原因
+    // （另一半是网页那层 CSS 压角，见 App.tsx）。
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.outputPass);
 
     this.applyPreset(preset, emotion, true);
     this.bindEvents();
