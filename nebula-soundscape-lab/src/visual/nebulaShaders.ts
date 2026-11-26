@@ -237,14 +237,14 @@ void main() {
   // 待机星系：金白核心 / 暖褐尘埃 / 蓝紫旋臂 / 洋红星结的逐顶点色，随 localT 错峰融入目标渐变
   vColor = mix(grad, aColor, colorW);
 
-  // 潮汐明暗呼吸：高潮泛光更亮，低落压暗到深空微光（±约 15%）
-  vGlow = (1.0 - colorT) * 0.4
-        + role * 0.12
-        + uBass * 0.35 * (1.0 - colorT)
-        + burst * 2.4
-        + wave * 1.4
-        + (uEnergy - 0.5) * 0.3;
-  vAlpha = (0.22 + 0.78 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2);
+  // 基础亮度沿用 dev 的压薄压淡取值；潮汐明暗呼吸在其上叠加（高潮略亮、低落压暗到深空微光）
+  vGlow = (1.0 - colorT) * 0.26
+        + role * 0.08
+        + uBass * 0.22 * (1.0 - colorT)
+        + burst * 1.8
+        + wave * 1.0
+        + (uEnergy - 0.5) * 0.22;
+  vAlpha = (0.14 + 0.5 * (1.0 - colorT * 0.55)) * fade * (0.82 + uEnergy * 0.2);
 }
 `;
 
@@ -263,7 +263,7 @@ void main() {
   float d = length(uv) * 2.0;
   float falloff = exp(-d * d * 2.4);
   float a = tex.a * falloff * vAlpha;
-  vec3 c = vColor * (0.45 + vGlow * 0.85);
+  vec3 c = vColor * (0.3 + vGlow * 0.55);
   gl_FragColor = vec4(c, a);
 }
 `;
@@ -307,3 +307,36 @@ void main() {
   gl_FragColor = vec4(vColor, tex.a * vAlpha);
 }
 `;
+
+// ---------------------------------------------------------------- 后期暗角
+
+/** 电影感暗角通道：四周压暗，中心保持明亮；强度随 bass 轻微呼吸 */
+export const VignetteShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uAmount: { value: 0.42 },
+    uAspect: { value: 1 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uAmount;
+    uniform float uAspect;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec2 p = vUv - 0.5;
+      p.x *= uAspect;
+      float d = length(p);
+      float vig = smoothstep(0.72, 0.28, d);
+      c.rgb *= mix(1.0 - uAmount, 1.0, vig);
+      gl_FragColor = c;
+    }
+  `,
+};

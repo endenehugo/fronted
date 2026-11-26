@@ -88,6 +88,8 @@ export class NebulaAudioEngine {
   private freqData: Uint8Array<ArrayBuffer> | null = null;
   private timeData: Uint8Array<ArrayBuffer> | null = null;
   private bands: AudioBands = { bass: 0, mid: 0, treble: 0, level: 0, tide: 0 };
+  /** 各频段近期能量峰值（自适应归一化基准，缓慢回落） */
+  private bandPeak: AudioBands = { bass: 0.2, mid: 0.2, treble: 0.2, level: 0, tide: 0 };
 
   get ready(): boolean {
     return !!this.ctx && this.ctx.state === 'running';
@@ -789,6 +791,19 @@ export class NebulaAudioEngine {
     const rawMid = Math.min(1, avg(150, 2000) * 1.8);
     const rawTreble = Math.min(1, avg(2000, sr / 2) * 2.8);
 
+    // 自适应归一化：跟踪近期峰值并缓慢回落，弱段也能被抬到可见起伏；峰值以下压暗避免过曝
+    const peakDecay = Math.exp(-dt * 0.8);
+    this.bandPeak.bass = Math.max(rawBass, this.bandPeak.bass * peakDecay);
+    this.bandPeak.mid = Math.max(rawMid, this.bandPeak.mid * peakDecay);
+    this.bandPeak.treble = Math.max(rawTreble, this.bandPeak.treble * peakDecay);
+    const norm = (raw: number, peak: number): number => {
+      const denom = Math.max(peak, 0.12);
+      return Math.min(1, (raw / denom) * 0.85);
+    };
+    const normBass = norm(rawBass, this.bandPeak.bass);
+    const normMid = norm(rawMid, this.bandPeak.mid);
+    const normTreble = norm(rawTreble, this.bandPeak.treble);
+
     // 总 RMS：时域样本偏离中值（128）的均方根。×5 后扣掉纯铺底的本底（≈0.12）、
     // 以高潮段（≈0.57）为满刻度，使低潮 ≈0.1、高潮 ≈1，静音时归零
     let rawLevel = 0;
@@ -803,9 +818,9 @@ export class NebulaAudioEngine {
     }
 
     const k = 1 - Math.exp(-Math.max(0.001, dt) * 14);
-    this.bands.bass += (rawBass - this.bands.bass) * k;
-    this.bands.mid += (rawMid - this.bands.mid) * k;
-    this.bands.treble += (rawTreble - this.bands.treble) * k;
+    this.bands.bass += (normBass - this.bands.bass) * k;
+    this.bands.mid += (normMid - this.bands.mid) * k;
+    this.bands.treble += (normTreble - this.bands.treble) * k;
     this.bands.level += (rawLevel - this.bands.level) * k;
     this.bands.tide = this.tideAt(this.ctx.currentTime);
 

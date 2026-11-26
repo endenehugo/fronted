@@ -107,4 +107,6 @@ export interface NebulaState {
   speed: number;
   seed: number;
   emotion: EmotionVector | null;
+  /** 效价滑块：-1 低落负向 ↔ 1 正向明亮；null 表示未手动覆盖（跟随文本解析） */
+  valence: number | null;
 }
