@@ -182,16 +182,9 @@ void main() {
   //     页面开得越久转得越快。角速度随潮汐能量与中频在约 2.5 倍范围内起伏：高潮加速、低落近乎静止。
   base.xz = rot2(base.xz, uSpinPhase * (1.0 + uShear * role / (0.35 + r)));
 
-  // 2.1b 六条情绪悬臂之间缓慢错开。
-  //      注意：这里必须是有界摆动，不能写成 t * armId * 速率 —— 那样角位移会随时间无限累积，
-  //      页面开一分钟后手臂编号 6 的粒子已被多转 ~8 rad，整颗星系看起来就像换了一颗
-  //      （点「返回大星系」时与刚进页面时不一致，刷新后才"变回来"，就是这个原因）。
-  //      减掉 t=0 的相位，保证首帧形态与原来的设计完全一致。
-  float armFade = 1.0 - smoothstep(0.0, 0.22, uMorphProgress);
-  float armId = aArm;
-  float armPhase0 = armId * 1.1;
-  float armSway = (sin(t * 0.06 + armPhase0) - sin(armPhase0)) * 0.22;
-  base.xz = rot2(base.xz, armSway * armFade);
+  // 2.1b 六条情绪悬臂同步转动：全部粒子共用 2.1 里那一个 uSpinPhase，不再按 aArm 各自错开。
+  //      早先每臂一个相位的「有界摆动」会让六条臂像六个独立转盘，臂间距越转越散，
+  //      CPU 侧的星巢锚点也跟着漂。aArm 仍留在顶点缓冲里，供形变落定与星巢定位使用。
 
   // 2.2 径向脉冲（随低频能量呼吸）
   // 呼吸脉冲：原来是 0.55 + 0.45·sin（振幅 0.45），低频一动整盘明暗跳变，
@@ -351,9 +344,13 @@ void main() {
 vShape = aShape;
   // 每颗星自己的呼吸节奏：相位错开、频率错开，三次幂让亮的是短促的一闪而不是缓慢起伏
   float tw = pow(0.5 + 0.5 * sin(uTime * (0.9 + aSeed * 2.2) + aSeed * 44.0), 3.0);
-  vAlpha = 0.12 + 0.88 * tw;
+  // 峰值压到 0.52 左右：之前的 1.0 峰值叠 bloom 后是一颗刺眼的白点，像坏点而不像星
+  vAlpha = 0.10 + 0.42 * tw;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z)) * (0.55 + 1.15 * tw);
+  // 点径下限钳在 3.2 设备像素：小于这个尺寸的点在加色混合下会退化成亚像素方块，
+  // 闪烁时忽大忽小正是"亮起来是马赛克"的直接来源。起伏也从 1.7 倍收到 1.17 倍。
+  float basePx = aSize * uPixelRatio * (34.0 / max(0.1, -mv.z));
+  gl_PointSize = clamp(basePx * (0.95 + 0.22 * tw), 3.2 * uPixelRatio, 48.0);
   gl_Position = projectionMatrix * mv;
 }
 `;
@@ -369,9 +366,11 @@ varying float vAlpha;
 varying float vShape;
 
 void main() {
-  vec4 tex = texture2D(uMap, gl_PointCoord);
+  // 解析高斯核取代方形点贴图：贴图采样在放大后会露出方形边界，
+  // 而解析核在任何点径下都是圆的，边缘用 smoothstep 收干净。
   vec2 uv = gl_PointCoord - 0.5;
-  float disc = tex.a;
+  float d = length(uv) * 2.0;
+  float disc = exp(-d * d * 3.4) * (1.0 - smoothstep(0.86, 1.0, d));
   if (vShape > 0.5) {
     // 亮星十字星芒：只在少量恒星上出现，是"天文照片感"最省成本的一笔
     float sx = pow(max(0.0, 1.0 - abs(uv.y) * 26.0), 3.0) * pow(max(0.0, 1.0 - abs(uv.x) * 2.2), 1.4);
