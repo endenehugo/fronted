@@ -326,6 +326,12 @@ export class NebulaAudioEngine {
       const now = this.ctx.currentTime;
       const bpm = this.preset.bpm;
       const step = 60 / bpm / 2; // 八分音符
+      // 标签页被节流 / 设备休眠回来后，nextNoteTime 可能已经落后好几秒。
+      // 直接进下面的 while 会把积压的旧音符一次性排到同一时刻，叠成一串爆音，
+      // 所以落后超过 0.6s 时丢弃积压，从当前时刻重新对齐节拍。
+      if (now - this.nextNoteTime > 0.6) {
+        this.nextNoteTime = now + 0.05;
+      }
       while (this.nextNoteTime < now + 0.35) {
         this.scheduleStep(this.nextNoteTime, step);
         this.nextNoteTime += step;
